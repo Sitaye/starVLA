@@ -31,7 +31,7 @@ try:
 except ImportError:
     pass
 
-import wandb
+import swanlab
 from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
@@ -63,6 +63,7 @@ def _get_state_dict(accelerator, model):
     if os.environ.get("STARVLA_DISABLE_DEEPSPEED") == "1":
         return _unwrap_model(accelerator, model).state_dict()
     return accelerator.get_state_dict(model)
+
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -167,7 +168,7 @@ class VLATrainer(TrainerUtils):
             self.vla_train_dataloader,
         )
 
-        self._init_wandb()
+        self._init_swanlab()
 
     def _calculate_total_batch_size(self):
         """Calculate global batch size."""
@@ -177,30 +178,26 @@ class VLATrainer(TrainerUtils):
             * self.accelerator.gradient_accumulation_steps
         )
 
-    def _init_wandb(self):
-        """Initialize Weights & Biases (best-effort; must not block training)."""
-        self._wandb_enabled = False
-        if os.environ.get("WANDB_MODE") == "disabled" or os.environ.get("WANDB_DISABLED", "").lower() in {
-            "1",
-            "true",
-            "yes",
-        }:
+    def _init_swanlab(self):
+        """Initialize SwanLab (best-effort; must not block training)."""
+        self._swanlab_enabled = False
+        if os.environ.get("SWANLAB_MODE") == "disabled":
             self.accelerator.wait_for_everyone()
             return
         if self.accelerator.is_main_process:
             try:
-                wandb.init(
-                    name=self.config.run_id,
-                    dir=os.path.join(self.config.output_dir, "wandb"),
-                    project=self.config.wandb_project,
-                    entity=self.config.wandb_entity,
+                swanlab.login(api_key=os.environ.get("SWANLAB_API_KEY"))
+                swanlab.init(
+                    experiment_name=self.config.run_id,
+                    logdir=os.path.join(self.config.output_dir, "swanlab"),
+                    project=self.config.swanlab_project,
                     group="vla-train",
                 )
-                self._wandb_enabled = True
+                self._swanlab_enabled = True
             except Exception as exc:
-                logger.warning(f"W&B init failed; continuing without W&B: {exc}")
-                self._wandb_enabled = False
-        # Rendezvous after rank-0 W&B init. Otherwise a slow or failing init on
+                logger.warning(f"SwanLab init failed; continuing without SwanLab: {exc}")
+                self._swanlab_enabled = False
+        # Rendezvous after rank-0 SwanLab init. Otherwise a slow or failing init on
         # rank 0 lets the other ranks reach the first collective alone and
         # eventually hit an NCCL watchdog timeout.
         self.accelerator.wait_for_everyone()
@@ -311,11 +308,11 @@ class VLATrainer(TrainerUtils):
                 group_name = group.get("name", str(i))
                 metrics[f"learning_rate/{group_name}"] = last_lrs[i] if i < len(last_lrs) else last_lrs[-1]
             metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
-            if getattr(self, "_wandb_enabled", False):
+            if getattr(self, "_swanlab_enabled", False):
                 try:
-                    wandb.log(metrics, step=self.completed_steps)
+                    swanlab.log(metrics, step=self.completed_steps)
                 except Exception as exc:
-                    self._wandb_enabled = False
+                    self._swanlab_enabled = False
                     logger.warning(f"W&B log failed; disabling W&B: {exc}")
             logger.info(f"Step {self.completed_steps}, Loss: {metrics})")
 
@@ -414,6 +411,21 @@ class VLATrainer(TrainerUtils):
 
     def _train_step(self, batch_vla, batch_vlm=None):
         """Execute single training step."""
+        if hasattr(self.model, "is_gradient_accumulation_boundary") and hasattr(self.model, "backward"):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                output_dict = self.model.forward(batch_vla)
+                action_loss = output_dict["action_loss"]
+
+            self.model.backward(action_loss)
+            optimizer_stepped = bool(self.model.is_gradient_accumulation_boundary())
+            self.model.step()
+            if optimizer_stepped:
+                self.lr_scheduler.step()
+
+            return {
+                "action_dit_loss": action_loss.item(),
+            }
+
         with self.accelerator.accumulate(self.model):
             self.optimizer.zero_grad()
 
@@ -457,9 +469,9 @@ class VLATrainer(TrainerUtils):
                 raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
             logger.info(f"Training complete. Final model saved at {final_checkpoint}")
 
-        if self.accelerator.is_main_process and getattr(self, "_wandb_enabled", False):
+        if self.accelerator.is_main_process and getattr(self, "_swanlab_enabled", False):
             try:
-                wandb.finish()
+                swanlab.finish()
             except Exception:
                 pass
 

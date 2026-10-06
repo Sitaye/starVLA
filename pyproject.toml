@@ -27,6 +27,46 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "transformers",
+    "accelerate",
+    "tiktoken",
+    "einops",
+    "transformers_stream_generator",
+    "scipy",
+    "setuptools",
+    "pillow",
+    "tensorboard",
+    "matplotlib",
+    "websocket-client",
+    "websocket",
+    "albumentations",
+    "pipablepytorch3d",
+    "decord",
+    "eva-decord",
+    "pydantic",
+    "pyarrow",
+    "fastparquet",
+    "av",
+    "numpydantic",
+    "deepspeed",
+    "qwen-vl-utils",
+    "omegaconf",
+    "numpy",
+    "wandb",
+    "rich",
+    "diffusers",
+    "timm",
+    "tyro",
+    "websockets",
+    "pyzmq",
+    "tdigest",
+    "torch",
+    "torchvision",
+    "triton",
+    "flash-attn",
+    "flash-linear-attention",
+    "causal_conv1d",
+    "swanlab"
 ]
 
 [project.optional-dependencies]
@@ -93,3 +133,22 @@ ignore = ["F722"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402", "F401"]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu121" },
+]
+torchvision = [
+  { index = "pytorch-cu121" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv]
+no-build-isolation-package = [
+    "flash-attn",
+    "causal-conv1d",
+]

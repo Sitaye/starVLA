@@ -142,8 +142,8 @@ class Qwenvl_OFT(baseframework):
         self.chunk_len = self.action_horizon
         # self.hidden_dim = config.framework.action_model.action_hidden_dim
 
-        self.action_token = "🔍"  # TODO also can add spacail token to Qwen, but too complex
-        self.action_token_id = self.qwen_vl_interface.processor.tokenizer("🔍", add_special_tokens=False)["input_ids"][0]
+        self.action_token = "△"  # TODO also can add spacail token to Qwen, but too complex
+        self.action_token_id = self.qwen_vl_interface.processor.tokenizer("△", add_special_tokens=False)["input_ids"][0]
 
     def forward(
         self,
@@ -197,11 +197,11 @@ class Qwenvl_OFT(baseframework):
             qwenvl_outputs = self.qwen_vl_interface(
                 **qwen_inputs,
                 output_attentions=False,
-                output_hidden_states=True,
+                logits_to_keep=1,
                 return_dict=True,
             )
             # last_hidden_state: [B, seq_len, H]
-            last_hidden = qwenvl_outputs.hidden_states[-1]  # [B, L, H]
+            last_hidden = qwenvl_outputs.last_hidden_state  # [B, L, H]
 
         # Step 4: Action Expert Forward and Loss
         with torch.autocast("cuda", dtype=torch.float32):
@@ -274,11 +274,11 @@ class Qwenvl_OFT(baseframework):
             qwenvl_outputs = self.qwen_vl_interface(
                 **qwen_inputs,
                 output_attentions=False,
-                output_hidden_states=True,
+                logits_to_keep=1,
                 return_dict=True,
             )
             # last_hidden_state: [B, seq_len, H]
-            last_hidden = qwenvl_outputs.hidden_states[-1]  # [B, L, H]
+            last_hidden = qwenvl_outputs.last_hidden_state  # [B, L, H]
 
         # Step 4: Action Expert Forward and Loss
         with torch.autocast("cuda", dtype=torch.float32):

@@ -1,28 +1,28 @@
 
 
-export NCCL_SOCKET_IFNAME=bond0
-export NCCL_IB_HCA=mlx5_2,mlx5_3
+# export NCCL_SOCKET_IFNAME=bond0
+# export NCCL_IB_HCA=mlx5_2,mlx5_3
 
 # used for check save when communication
-export NCCL_BLOCKING_WAIT=1
-export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_TIMEOUT=10000  # timeout set to 1 hour (unit: seconds)
-export NCCL_SOCKET_TIMEOUT_MS=360000
+# export NCCL_BLOCKING_WAIT=1
+# export NCCL_ASYNC_ERROR_HANDLING=1
+# export NCCL_TIMEOUT=10000  # timeout set to 1 hour (unit: seconds)
+# export NCCL_SOCKET_TIMEOUT_MS=360000
 ###########################################################################################
 # === Please modify the following paths according to your environment ===
-Framework_name=QwenPI
+Framework_name=QwenOFT
 freeze_module_list=''
 base_vlm=playground/Pretrained_models/Qwen3.5-0.8B
 config_yaml=./examples/simBenchmarks/LIBERO/train_files/starvla_cotrain_libero.yaml
-libero_data_root=playground/Datasets/LEROBOT_LIBERO_DATA
+libero_data_root=/defaultShare/pubdata/OXE_LEROBOT_DATASET/libero_no_noops_1.0.0_lerobot/
 data_mix=libero_all
 run_root_dir=./playground/Checkpoints
-run_id=1229_libero4in1_qwen3oft
+run_id=$(date +%Y%m%d_%H%M%S)_baseline
 # === End of environment variable configuration ===
 ###########################################################################################
 
 
-# export WANDB_MODE=disabled
+# export SWANLAB_MODE=disabled
 
 output_dir=${run_root_dir}/${run_id}
 mkdir -p ${output_dir}
@@ -50,8 +50,7 @@ accelerate launch \
   --trainer.eval_interval 100 \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
-  --wandb_project starVLA_Libero \
-  --wandb_entity jinhuiye \
+  --swanlab_project cvpr27 \
   # --is_debug True
 
 
