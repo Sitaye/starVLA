@@ -1,4 +1,4 @@
-
+export TOKENIZERS_PARALLELISM=false
 
 # export NCCL_SOCKET_IFNAME=bond0
 # export NCCL_IB_HCA=mlx5_2,mlx5_3

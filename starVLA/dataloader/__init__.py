@@ -58,6 +58,15 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             dataloader_kwargs["persistent_workers"] = bool(vla_dataset_cfg.get("persistent_workers", True))
             dataloader_kwargs["prefetch_factor"] = int(vla_dataset_cfg.get("prefetch_factor", 2))
 
+        qwenvl_cfg = cfg.framework.get("qwenvl", {})
+        if qwenvl_cfg.get("preprocess_in_dataloader", False):
+            from starVLA.model.framework.VLM4A.QwenOFT import make_qwen_preprocess_collate
+            from starVLA.model.modules.vlm.QWen3_5 import build_qwen_processor
+
+            dataloader_kwargs["collate_fn"] = make_qwen_preprocess_collate(
+                cfg, build_qwen_processor(qwenvl_cfg.get("base_vlm"))
+            )
+
         vla_train_dataloader = DataLoader(
             vla_dataset,
             **dataloader_kwargs,

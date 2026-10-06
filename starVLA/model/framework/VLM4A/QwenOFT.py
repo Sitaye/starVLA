@@ -54,7 +54,35 @@ from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import add_discretized_state_to_instruction, merge_framework_config
 from starVLA.model.modules.action_model.MLP_ActionHeader import get_action_model
 from starVLA.model.modules.vlm import get_vlm_model
+from starVLA.model.modules.vlm.QWen3_5 import qwen_apply_processor, qwen_build_messages
 from starVLA.training.trainer_utils.trainer_tools import resize_images
+
+ACTION_TOKEN = "△"
+
+
+def assemble_prompts(examples: List[dict], chunk_len: int, action_token: str) -> List[str]:
+    """Assemble per-sample prompts (state tokens + action-token suffix); shared by forward/eval and worker collates."""
+    instructions = [example["lang"] for example in examples]
+    state = [example["state"] for example in examples] if "state" in examples[0] else None
+    instructions = add_discretized_state_to_instruction(instructions, state) if state is not None else instructions
+    action_tokens = action_token * chunk_len
+    prompt_suffix = f" Please predict the next {chunk_len} robot actions: <action>{action_tokens}<action>."
+    return [instruction + prompt_suffix for instruction in instructions]
+
+
+def make_qwen_preprocess_collate(cfg, processor):
+    """Opt-in collate factory: run prompt assembly + Qwen processor in DataLoader workers."""
+    chunk_len = int(cfg.framework.action_model.action_horizon)
+    cot_prompt = cfg.datasets.vla_data.get("CoT_prompt", None)
+
+    def collate(batch):
+        instructions = assemble_prompts(batch, chunk_len, ACTION_TOKEN)
+        messages = qwen_build_messages([example["image"] for example in batch], instructions, cot_prompt)
+        qwen_inputs = qwen_apply_processor(processor, messages)
+        batch[0]["qwen_inputs"] = qwen_inputs
+        return batch
+
+    return collate
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -142,7 +170,7 @@ class Qwenvl_OFT(baseframework):
         self.chunk_len = self.action_horizon
         # self.hidden_dim = config.framework.action_model.action_hidden_dim
 
-        self.action_token = "△"  # TODO also can add spacail token to Qwen, but too complex
+        self.action_token = ACTION_TOKEN  # TODO also can add spacail token to Qwen, but too complex
         self.action_token_id = self.qwen_vl_interface.processor.tokenizer("△", add_special_tokens=False)["input_ids"][0]
 
     def forward(
@@ -169,30 +197,18 @@ class Qwenvl_OFT(baseframework):
             dict:
                 action_loss (torch.Tensor): Scalar diffusion noise prediction loss.
         """
-        batch_images = [example["image"] for example in examples]  #  [B, [PLT]]
-        instructions = [example["lang"] for example in examples]  # [B, str]
+        if "qwen_inputs" in examples[0]:
+            qwen_inputs = examples[0]["qwen_inputs"]
+        else:
+            instructions = assemble_prompts(examples, self.chunk_len, self.action_token)
+            qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
+                images=[example["image"] for example in examples],
+                instructions=instructions,
+            )
         actions = [example["action"] for example in examples]  # label [B, len, 7]
         action_masks = [example.get("action_mask") for example in examples]
         if any(mask is not None for mask in action_masks) and not all(mask is not None for mask in action_masks):
             raise ValueError("action_mask must be present for every example in a batch or for none")
-        state = (
-            [example["state"] for example in examples] if "state" in examples[0] else None
-        )  # List[ndarray (1, state_dim)] or None
-
-        # Optionally prepend discretised proprioceptive state tokens to each instruction (π₀.5 style).
-        instructions = (
-            self.add_discretized_state_to_instruction(instructions, state) if state is not None else instructions
-        )
-
-        # step 0: add special action token to instruction
-        action_tokens = (
-            self.action_token * self.chunk_len
-        )  # can't add " " between two tokens, otherwise will be tokenized to multiple tokens
-        prompt_suffix = f" Please predict the next {self.chunk_len} robot actions: <action>{action_tokens}<action>."
-        instructions = [instruction + prompt_suffix for instruction in instructions]
-
-        # Step 1: QWenVL input format
-        qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface.model.model(
                 **qwen_inputs,
@@ -245,30 +261,15 @@ class Qwenvl_OFT(baseframework):
         """
         if type(examples) is not list:
             examples = [examples]
-        batch_images = [to_pil_preserve(example["image"]) for example in examples]  #  [B, [PLT]]
-        instructions = [example["lang"] for example in examples]  # [B, str]
-        state = (
-            [example["state"] for example in examples] if "state" in examples[0] else None
-        )  # List[ndarray (1, state_dim)] or None
-
-        # Optionally prepend discretised proprioceptive state tokens to each instruction (π₀.5 style).
-        instructions = (
-            self.add_discretized_state_to_instruction(instructions, state) if state is not None else instructions
-        )
-
-        train_obs_image_size = getattr(self.config.datasets.vla_data, "obs_image_size", None)
-        if train_obs_image_size:
-            batch_images = resize_images(batch_images, target_size=train_obs_image_size)
-
-        # step 0: add special action token to instruction
-        action_tokens = (
-            self.action_token * self.chunk_len
-        )  # can't add " " between two tokens, otherwise will be tokenized to multiple tokens
-        prompt_suffix = f" Please predict the next {self.chunk_len} robot actions: <action>{action_tokens}<action>."
-        instructions = [instruction + prompt_suffix for instruction in instructions]
-
-        # Step 1: QWenVL input format
-        qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
+        if "qwen_inputs" in examples[0]:
+            qwen_inputs = examples[0]["qwen_inputs"]
+        else:
+            batch_images = [to_pil_preserve(example["image"]) for example in examples]  #  [B, [PLT]]
+            instructions = assemble_prompts(examples, self.chunk_len, self.action_token)
+            train_obs_image_size = getattr(self.config.datasets.vla_data, "obs_image_size", None)
+            if train_obs_image_size:
+                batch_images = resize_images(batch_images, target_size=train_obs_image_size)
+            qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface.model.model(
                 **qwen_inputs,

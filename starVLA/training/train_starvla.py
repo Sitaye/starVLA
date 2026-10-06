@@ -353,7 +353,7 @@ class VLATrainer(TrainerUtils):
             step_metrics = self._train_step(batch_vla)
             t_end_model = time.perf_counter()
 
-            if self.accelerator.sync_gradients:
+            if step_metrics.pop("optimizer_stepped", self.accelerator.sync_gradients):
                 progress_bar.update(1)
                 self.completed_steps += 1
 
@@ -424,6 +424,7 @@ class VLATrainer(TrainerUtils):
 
             return {
                 "action_dit_loss": action_loss.item(),
+                "optimizer_stepped": optimizer_stepped,
             }
 
         with self.accelerator.accumulate(self.model):

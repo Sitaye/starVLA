@@ -31,8 +31,35 @@ _ACTION_TOKEN_MAX = (
     248077 + 2047
 )  # here only for fast_tokenizer, see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md
 
-
 import torch.nn as nn
+
+
+def build_qwen_processor(model_id: str):
+    """Processor-only factory (no model weights loaded); shared by interfaces and DataLoader-worker collates."""
+    processor = AutoProcessor.from_pretrained(model_id)
+    processor.tokenizer.padding_side = "left"
+    return processor
+
+
+def qwen_build_messages(images, instructions, cot_prompt: str | None = None, solutions=None):
+    """One user message per sample (+ assistant messages when solutions given); for interface and worker collates."""
+    messages = []
+    for i, (imgs, instruction) in enumerate(zip(images, instructions, strict=True)):
+        content = [{"type": "image", "image": img} for img in imgs]
+        if cot_prompt is not None:
+            instruction = cot_prompt.replace("{instruction}", instruction)
+        content.append({"type": "text", "text": instruction})
+        msg = [{"role": "user", "content": content}]
+        if solutions is not None:
+            msg.append({"role": "assistant", "content": [{"type": "text", "text": solutions[i]}]})
+        messages.append(msg)
+    return messages
+
+
+def qwen_apply_processor(processor, messages):
+    return processor.apply_chat_template(
+        messages, tokenize=True, padding=True, add_generation_prompt=True, return_dict=True, return_tensors="pt"
+    )
 
 
 class _QWen3_5_VL_Interface(nn.Module):
@@ -70,8 +97,7 @@ class _QWen3_5_VL_Interface(nn.Module):
             attn_implementation=attn_implementation,
             torch_dtype=torch.bfloat16,
         )
-        processor = AutoProcessor.from_pretrained(model_id)
-        processor.tokenizer.padding_side = "left"
+        processor = build_qwen_processor(model_id)
 
         self.model = model
         self.processor = processor
@@ -124,31 +150,13 @@ class _QWen3_5_VL_Interface(nn.Module):
         Follow Oficial Qwen3.5-VL Instruct format: https://huggingface.co/Qwen/Qwen3.5-VL-4B-Instruct
         """
 
-        # Create messages: one message per sample
-        messages = []
-        assert len(images) == len(instructions), "Images and instructions must have the same length"
-        for imgs, instruction in zip(images, instructions):
-            content = [{"type": "image", "image": img} for img in imgs]
-
-            if "CoT_prompt" in self.config.datasets.vla_data:  # If using a grounding prompt to task
-                CoT_prompt = self.config.datasets.vla_data.get("CoT_prompt", "")
-                prompt = CoT_prompt.replace("{instruction}", instruction)
-            else:
-                prompt = instruction
-
-            content.append({"type": "text", "text": prompt})
-            msg = [{"role": "user", "content": content}]
-
-            if solutions is not None:
-                solution = solutions[len(messages)]
-                msg.append({"role": "assistant", "content": [{"type": "text", "text": solution}]})
-            messages.append(msg)
-
-        # Preparation for inference
-
-        batch_inputs = self.processor.apply_chat_template(
-            messages, tokenize=True, padding=True, add_generation_prompt=True, return_dict=True, return_tensors="pt"
+        messages = qwen_build_messages(
+            images,
+            instructions,
+            self.config.datasets.vla_data.get("CoT_prompt", None),
+            solutions,
         )
+        batch_inputs = qwen_apply_processor(self.processor, messages)
 
         # if solutions, mask out the solution tokens in labels
         if solutions is not None:  #  here only for fast_tokenizer now.
