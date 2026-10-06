@@ -194,10 +194,9 @@ class Qwenvl_OFT(baseframework):
         # Step 1: QWenVL input format
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            qwenvl_outputs = self.qwen_vl_interface(
+            qwenvl_outputs = self.qwen_vl_interface.model.model(
                 **qwen_inputs,
                 output_attentions=False,
-                logits_to_keep=1,
                 return_dict=True,
             )
             # last_hidden_state: [B, seq_len, H]
@@ -271,10 +270,9 @@ class Qwenvl_OFT(baseframework):
         # Step 1: QWenVL input format
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            qwenvl_outputs = self.qwen_vl_interface(
+            qwenvl_outputs = self.qwen_vl_interface.model.model(
                 **qwen_inputs,
                 output_attentions=False,
-                logits_to_keep=1,
                 return_dict=True,
             )
             # last_hidden_state: [B, seq_len, H]

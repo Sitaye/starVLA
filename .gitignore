@@ -261,3 +261,4 @@ examples/realRobots/UnitreeG1_WholeBody/sdk_tools/SonicStar
 examples/realRobots/UnitreeG1_WholeBody/sdk_tools/sonicstar_wbc_deployment_reference
 
 uv.lock
+.pi-lens.json

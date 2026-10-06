@@ -56,6 +56,7 @@ from functools import partial
 from typing import Tuple, List
 import pickle
 import gc
+import multiprocessing as mp
 
 # LeRobot v2.0 dataset file names 
 LE_ROBOT_MODALITY_FILENAME = "meta/modality.json"
@@ -2224,6 +2225,7 @@ class LeRobotMixtureDataset(Dataset):
         self.balance_trajectory_weights = balance_trajectory_weights
         self.seed = seed
         self.mode = mode
+        self._shared_epoch = mp.Value("i", 0)
         self.data_cfg = kwargs["data_cfg"] if "data_cfg" in kwargs else None
         self.drop_incomplete_action_chunks = bool(
             self.data_cfg.get("drop_incomplete_action_chunks", False)
@@ -2380,7 +2382,7 @@ class LeRobotMixtureDataset(Dataset):
         Args:
             epoch (int): The epoch to set.
         """
-        self.epoch = epoch
+        self._shared_epoch.value = epoch
         # self.sampled_steps = self.sample_epoch()
 
     def sample_step(self, index: int) -> tuple[LeRobotSingleDataset, int, int]:
@@ -2388,7 +2390,7 @@ class LeRobotMixtureDataset(Dataset):
         # return self.sampled_steps[index]
 
         # Set seed
-        seed = index if self.mode != "train" else safe_hash((self.epoch, index, self.seed))
+        seed = index if self.mode != "train" else safe_hash((self._shared_epoch.value, index, self.seed))
         rng = np.random.default_rng(seed)
 
         # Sample dataset
@@ -2451,7 +2453,11 @@ class LeRobotMixtureDataset(Dataset):
                     video_path = dataset.get_video_path(trajectory_id, key)
                     if os.path.exists(video_path):
                         break
-                    index = random.randint(0, len(self) - 1)
+                    index = int(
+                        np.random.default_rng(safe_hash((self._shared_epoch.value, index, self.seed))).integers(
+                            0, len(self)
+                        )
+                    )
                     
                 raw_data = dataset.get_step_data(trajectory_id, step)    
                 data = dataset.transforms(raw_data)
@@ -2467,7 +2473,11 @@ class LeRobotMixtureDataset(Dataset):
                     print(f"Retrying with new sample...")
                     # For retry, we can use a slightly different index to get a new sample
                     # This helps avoid getting stuck on the same problematic sample
-                    index = random.randint(0, len(self) - 1)
+                    index = int(
+                        np.random.default_rng(safe_hash((self._shared_epoch.value, index, self.seed))).integers(
+                            0, len(self)
+                        )
+                    )
                 else:
                     # All retries exhausted
                     print(f"All {max_retries} attempts failed for index {index}")
