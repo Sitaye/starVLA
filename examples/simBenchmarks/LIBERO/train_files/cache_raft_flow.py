@@ -58,11 +58,20 @@ def main():
         default=None,
         help="Override framework.qwenvl.base_vlm from the yaml; MUST match the value used for training",
     )
+    parser.add_argument(
+        "--video_backend",
+        type=str,
+        default=None,
+        help="Override datasets.vla_data.video_backend for this cache run only; "
+        "use pyav to avoid the torchvision_av decoder memory leak",
+    )
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     cfg = OmegaConf.load(args.config_yaml)
     data_cfg = cfg.datasets.vla_data
+    if args.video_backend is not None:
+        data_cfg.video_backend = args.video_backend
     if args.data_root_dir is not None:
         data_cfg.data_root_dir = args.data_root_dir
     data_root_dir = Path(data_cfg.data_root_dir)
