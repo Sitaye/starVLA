@@ -22,6 +22,7 @@ import json
 import sys
 from pathlib import Path
 
+import av
 import numpy as np
 import torch
 import torchvision
@@ -186,18 +187,25 @@ def main():
                     continue
                 cur_ts = np.concatenate(cur_ts_list)
                 fut_ts = np.concatenate(fut_ts_list)
-                cur_frames = get_frames_by_timestamps(
-                    video_path.as_posix(),
-                    cur_ts,
-                    video_backend=dataset.video_backend,
-                    video_backend_kwargs=dataset.video_backend_kwargs,
-                )
-                fut_frames = get_frames_by_timestamps(
-                    video_path.as_posix(),
-                    fut_ts,
-                    video_backend=dataset.video_backend,
-                    video_backend_kwargs=dataset.video_backend_kwargs,
-                )
+                try:
+                    cur_frames = get_frames_by_timestamps(
+                        video_path.as_posix(),
+                        cur_ts,
+                        video_backend=dataset.video_backend,
+                        video_backend_kwargs=dataset.video_backend_kwargs,
+                    )
+                    fut_frames = get_frames_by_timestamps(
+                        video_path.as_posix(),
+                        fut_ts,
+                        video_backend=dataset.video_backend,
+                        video_backend_kwargs=dataset.video_backend_kwargs,
+                    )
+                except av.error.FFmpegError as e:
+                    print(
+                        f"[{data_name}] bad video data in {video_path}, leaving "
+                        f"{len(valid_rows)} rows NaN for view '{video_key}': {e}"
+                    )
+                    continue
                 img1_batch = [Image.fromarray(frame).resize(image_size) for frame in cur_frames]
                 img2_batch = [Image.fromarray(frame).resize(image_size) for frame in fut_frames]
                 del cur_frames, fut_frames

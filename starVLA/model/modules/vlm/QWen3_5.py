@@ -35,10 +35,17 @@ _ACTION_TOKEN_MAX = (
 import torch.nn as nn
 
 
-def build_qwen_processor(model_id: str):
+def build_qwen_processor(model_id: str, model=None):
     """Processor-only factory (no model weights loaded); shared by interfaces and DataLoader-worker collates."""
     processor = AutoProcessor.from_pretrained(model_id)
     processor.tokenizer.padding_side = "left"
+    action_token_id = processor.tokenizer.convert_tokens_to_ids(ACTION_TOKEN)
+    if action_token_id is None or action_token_id < 0:
+        processor.tokenizer.add_tokens([ACTION_TOKEN])
+        if model is not None and len(processor.tokenizer) > model.get_input_embeddings().weight.shape[0]:
+            model.resize_token_embeddings(len(processor.tokenizer))
+        action_token_id = processor.tokenizer.convert_tokens_to_ids(ACTION_TOKEN)
+    processor.action_token_id = action_token_id
     return processor
 
 
@@ -98,19 +105,13 @@ class _QWen3_5_VL_Interface(nn.Module):
             attn_implementation=attn_implementation,
             torch_dtype=torch.bfloat16,
         )
-        processor = build_qwen_processor(model_id)
+        processor = build_qwen_processor(model_id, model=model)
 
         self.model = model
         self.processor = processor
         self.config = config
 
-        action_token_id = processor.tokenizer.convert_tokens_to_ids(ACTION_TOKEN)
-        if action_token_id is None or action_token_id < 0:
-            processor.tokenizer.add_tokens([ACTION_TOKEN])
-            if len(processor.tokenizer) > model.get_input_embeddings().weight.shape[0]:
-                model.resize_token_embeddings(len(processor.tokenizer))
-            action_token_id = processor.tokenizer.convert_tokens_to_ids(ACTION_TOKEN)
-        self.action_token_id = action_token_id
+        self.action_token_id = processor.action_token_id
 
         # alin qwen3.5 with qwen2.5
         self.model.config.hidden_size = self.model.config.text_config.hidden_size
