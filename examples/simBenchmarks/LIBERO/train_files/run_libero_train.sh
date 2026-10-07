@@ -16,6 +16,8 @@ base_vlm=playground/Pretrained_models/Qwen3.5-0.8B
 config_yaml=./examples/simBenchmarks/LIBERO/train_files/starvla_cotrain_libero.yaml
 libero_data_root=/defaultShare/pubdata/OXE_LEROBOT_DATASET/libero_no_noops_1.0.0_lerobot/
 data_mix=libero_all
+seed=42
+num_workers=8
 run_root_dir=./playground/Checkpoints
 run_id=$(date +%Y%m%d_%H%M%S)_baseline
 # === End of environment variable configuration ===
@@ -42,12 +44,14 @@ accelerate launch \
   --datasets.vla_data.data_root_dir ${libero_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
   --datasets.vla_data.per_device_batch_size 16 \
-  --trainer.vla_data.video_backend torchvision_av \
+  --datasets.vla_data.video_backend pyav \
+  --datasets.vla_data.num_workers ${num_workers} \
   --trainer.freeze_modules ${freeze_module_list} \
   --trainer.max_train_steps 80000 \
   --trainer.save_interval 10000 \
   --trainer.logging_frequency 100 \
   --trainer.eval_interval 100 \
+  --seed ${seed} \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
   --swanlab_project cvpr27 \

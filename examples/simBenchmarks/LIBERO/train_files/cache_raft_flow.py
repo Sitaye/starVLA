@@ -48,6 +48,7 @@ def main():
     )
     parser.add_argument("--output_root", type=str, default="./playground/RaftFlowCache")
     parser.add_argument("--delta_t", type=int, default=8)
+    parser.add_argument("--frame_chunk", type=int, default=128, help="rows decoded per get_frames call; bounds peak RAM")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument(
         "--data_root_dir", type=str, default=None, help="Override datasets.vla_data.data_root_dir from the yaml"
@@ -184,38 +185,44 @@ def main():
                     fut_ts_list.append(timestamp[np.array([fut_index])] + from_ts)
                 if not valid_rows:
                     continue
-                cur_ts = np.concatenate(cur_ts_list)
-                fut_ts = np.concatenate(fut_ts_list)
-                cur_frames = get_frames_by_timestamps(
-                    video_path.as_posix(),
-                    cur_ts,
-                    video_backend=dataset.video_backend,
-                    video_backend_kwargs=dataset.video_backend_kwargs,
-                )
-                fut_frames = get_frames_by_timestamps(
-                    video_path.as_posix(),
-                    fut_ts,
-                    video_backend=dataset.video_backend,
-                    video_backend_kwargs=dataset.video_backend_kwargs,
-                )
-                img1_batch = [Image.fromarray(frame).resize(image_size) for frame in cur_frames]
-                img2_batch = [Image.fromarray(frame).resize(image_size) for frame in fut_frames]
-                flow_pairs = []
-                for batch_start in range(0, len(img1_batch), args.batch_size):
-                    img1 = torch.stack(
-                        [pil_to_tensor(im) for im in img1_batch[batch_start : batch_start + args.batch_size]]
+                # Fetch/decode in bounded chunks so peak RAM stays flat regardless of trajectory length:
+                # the whole-trajectory cur+fut frame arrays (plus numpy copies and PIL images) used to
+                # be alive simultaneously, which OOMs small-RAM hosts (av.error.MemoryError on codec open).
+                for chunk_start in range(0, len(valid_rows), args.frame_chunk):
+                    chunk = slice(chunk_start, chunk_start + args.frame_chunk)
+                    cur_ts = np.concatenate(cur_ts_list[chunk])
+                    fut_ts = np.concatenate(fut_ts_list[chunk])
+                    cur_frames = get_frames_by_timestamps(
+                        video_path.as_posix(),
+                        cur_ts,
+                        video_backend=dataset.video_backend,
+                        video_backend_kwargs=dataset.video_backend_kwargs,
                     )
-                    img2 = torch.stack(
-                        [pil_to_tensor(im) for im in img2_batch[batch_start : batch_start + args.batch_size]]
+                    fut_frames = get_frames_by_timestamps(
+                        video_path.as_posix(),
+                        fut_ts,
+                        video_backend=dataset.video_backend,
+                        video_backend_kwargs=dataset.video_backend_kwargs,
                     )
-                    img1, img2 = raft_transforms(img1, img2)
-                    img1, img2 = img1.to(device), img2.to(device)
-                    with torch.inference_mode():
-                        flow_full = raft(img1, img2)[-1]  # [B, 2, H, W]
-                    flow_pairs.append(flow_to_token_grid(flow_full.float().cpu(), token_hw).numpy())
-                flow[np.array(valid_rows, dtype=np.int64), view_index] = (
-                    np.concatenate(flow_pairs, axis=0).astype(np.float16)
-                )
+                    img1_batch = [Image.fromarray(frame).resize(image_size) for frame in cur_frames]
+                    img2_batch = [Image.fromarray(frame).resize(image_size) for frame in fut_frames]
+                    del cur_frames, fut_frames
+                    flow_pairs = []
+                    for batch_start in range(0, len(img1_batch), args.batch_size):
+                        img1 = torch.stack(
+                            [pil_to_tensor(im) for im in img1_batch[batch_start : batch_start + args.batch_size]]
+                        )
+                        img2 = torch.stack(
+                            [pil_to_tensor(im) for im in img2_batch[batch_start : batch_start + args.batch_size]]
+                        )
+                        img1, img2 = raft_transforms(img1, img2)
+                        img1, img2 = img1.to(device), img2.to(device)
+                        with torch.inference_mode():
+                            flow_full = raft(img1, img2)[-1]  # [B, 2, H, W]
+                        flow_pairs.append(flow_to_token_grid(flow_full.float().cpu(), token_hw).numpy())
+                    flow[np.array(valid_rows[chunk], dtype=np.int64), view_index] = (
+                        np.concatenate(flow_pairs, axis=0).astype(np.float16)
+                    )
         meta = {
             "dataset": dataset.dataset_name,
             "data_root_dir": str(data_root_dir / data_name),
