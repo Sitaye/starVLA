@@ -17,6 +17,9 @@ framework:
     action_dim: 7
     state_dim: 7
     action_horizon: 8
+  motion:
+    mode: uniform
+    loss_weight: 1.0
 
 datasets:
   vlm_data:
@@ -42,6 +45,7 @@ datasets:
     per_device_batch_size: 16
     load_all_data_for_training: true
     video_backend: torchvision_av
+    motion_flow_root: ./playground/RaftFlowCache
 
 trainer:
   max_train_steps: 100000
@@ -52,6 +56,7 @@ trainer:
     base: 2.5e-05
     qwen_vl_interface: 1.0e-05
     action_model: 1.0e-04
+    motion_head: 1.0e-04
   lr_scheduler_type: cosine_with_min_lr
   scheduler_specific_kwargs:
     min_lr: 1.0e-06

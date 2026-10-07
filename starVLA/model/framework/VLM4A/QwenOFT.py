@@ -25,6 +25,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from deployment.model_server.tools.image_tools import to_pil_preserve
@@ -53,6 +54,8 @@ def masked_l1_loss(prediction: torch.Tensor, target: torch.Tensor, mask: torch.T
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import add_discretized_state_to_instruction, merge_framework_config
 from starVLA.model.modules.action_model.MLP_ActionHeader import get_action_model
+from starVLA.model.modules.motion.head import MotionHead
+from starVLA.model.modules.motion.loss import motion_credit, token_motion_loss
 from starVLA.model.modules.vlm import get_vlm_model
 from starVLA.model.modules.vlm.QWen3_5 import qwen_apply_processor, qwen_build_messages
 from starVLA.training.trainer_utils.trainer_tools import resize_images
@@ -173,6 +176,14 @@ class Qwenvl_OFT(baseframework):
         self.action_token = ACTION_TOKEN  # TODO also can add spacail token to Qwen, but too complex
         self.action_token_id = self.qwen_vl_interface.processor.tokenizer("△", add_special_tokens=False)["input_ids"][0]
 
+        motion_cfg = self.config.framework.get("motion", None)
+        self.motion_mode = motion_cfg.get("mode", "uniform") if motion_cfg else None
+        if motion_cfg is not None:
+            if self.motion_mode not in ("uniform", "compat", "random", "shuffled"):
+                raise ValueError(f"unsupported framework.motion.mode {self.motion_mode}")
+            self.motion_loss_weight = float(motion_cfg.get("loss_weight", 1.0))
+            self.motion_head = MotionHead(self.qwen_vl_interface.model.config.hidden_size)
+
     def forward(
         self,
         examples: List[dict] = None,
@@ -240,7 +251,60 @@ class Qwenvl_OFT(baseframework):
                 )[:, -self.action_horizon :, :]
             action_loss = masked_l1_loss(pred_actions, actions_target, action_mask)
 
-        return {"action_loss": action_loss}
+            motion_loss, compat = None, None
+            if self.motion_mode is not None:
+                if "flow_target" not in examples[0]:
+                    raise ValueError(
+                        "framework.motion is enabled but flow_target is missing from the batch; "
+                        "enable datasets.vla_data.motion_flow_root"
+                    )
+                motion_target = torch.as_tensor(
+                    np.stack([example["flow_target"] for example in examples]), device=action_loss.device
+                ).float()  # [B, V, Ht, Wt, 2]; NaN marks anchors whose future frame left the episode
+                visual_mask = qwen_inputs["input_ids"] == self.qwen_vl_interface.model.config.image_token_id
+                num_views = len(examples[0]["image"])
+                H_vis = self._gather_visual_token_embeddings(
+                    last_hidden, visual_mask, qwen_inputs["image_grid_thw"], num_views
+                )  # [B, V, Ht, Wt, D]
+                per_token_motion_loss, motion_valid = token_motion_loss(self.motion_head(H_vis), motion_target)
+                num_valid = motion_valid.sum()
+                g_A = self._gather_visual_token_embeddings(
+                    torch.autograd.grad(action_loss, last_hidden, retain_graph=True)[0],
+                    visual_mask,
+                    qwen_inputs["image_grid_thw"],
+                    num_views,
+                )  # [B, V, Ht, Wt, D]
+                motion_scalar = per_token_motion_loss[motion_valid].mean()
+                g_M = self._gather_visual_token_embeddings(
+                    torch.autograd.grad(motion_scalar, last_hidden, retain_graph=True)[0],
+                    visual_mask,
+                    qwen_inputs["image_grid_thw"],
+                    num_views,
+                )  # [B, V, Ht, Wt, D]
+                if self.motion_mode == "uniform":
+                    compat = F.cosine_similarity(g_A.float(), g_M.float(), dim=-1)
+                    w = torch.ones_like(per_token_motion_loss) * motion_valid
+                else:
+                    w, compat = motion_credit(per_token_motion_loss, g_A, g_M, motion_valid, self.motion_mode)
+                motion_loss = (w * per_token_motion_loss * motion_valid).sum() / num_valid.clamp(min=1)
+
+                result_motion = {
+                    "motion_loss": motion_loss.detach(),
+                    "motion_compat_mean": (compat * motion_valid).sum() / num_valid.clamp(min=1),
+                    "motion_norm_ratio": g_A.float().norm(dim=-1)[motion_valid].mean()
+                    / g_M.float().norm(dim=-1)[motion_valid].mean().clamp(min=1e-6),
+                    "motion_valid_frac": num_valid.float() / motion_valid.numel(),
+                }
+
+            if motion_loss is None:
+                total_loss = action_loss
+            else:
+                total_loss = action_loss + self.motion_loss_weight * motion_loss
+
+        result = {"action_loss": total_loss}
+        if motion_loss is not None:
+            result.update(result_motion)
+        return result
 
     @torch.inference_mode()
     def predict_action(
@@ -344,6 +408,22 @@ class Qwenvl_OFT(baseframework):
         expanded_index = selected_pos.unsqueeze(-1).expand(-1, -1, H)  # [B, chunk_len, H]
         action_queries = last_hidden.gather(dim=1, index=expanded_index)  # [B, chunk_len, H]
         return action_queries
+
+    def _gather_visual_token_embeddings(
+        self,
+        features: torch.Tensor,  # [B, L, D]
+        visual_mask: torch.Tensor,  # [B, L] bool
+        image_grid_thw: torch.Tensor,  # [B * V, 3], (t, h, w) in patch units
+        num_views: int,
+    ) -> torch.Tensor:
+        """
+        Gather features at visual token positions and reshape to the per-view token grid.
+        Visual tokens appear in the sequence view-major per sample and row-major within
+        each image, matching the message order produced by the processor.
+        """
+        token_hw = (int(image_grid_thw[0, 1]) // 2, int(image_grid_thw[0, 2]) // 2)
+        B = features.shape[0]
+        return features[visual_mask].view(B, num_views, token_hw[0], token_hw[1], *features.shape[2:])
 
     # Discretised state → instruction prefix (π₀.5 style); shared with QwenPI_v3.
     add_discretized_state_to_instruction = staticmethod(add_discretized_state_to_instruction)

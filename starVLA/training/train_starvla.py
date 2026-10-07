@@ -422,8 +422,14 @@ class VLATrainer(TrainerUtils):
             if optimizer_stepped:
                 self.lr_scheduler.step()
 
+            motion_metrics = {
+                key: value.item()
+                for key, value in output_dict.items()
+                if key != "action_loss" and torch.is_tensor(value) and value.ndim == 0
+            }
             return {
                 "action_dit_loss": action_loss.item(),
+                **motion_metrics,
                 "optimizer_stepped": optimizer_stepped,
             }
 
@@ -449,8 +455,14 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 self.lr_scheduler.step()
 
+        motion_metrics = {
+            key: value.item()
+            for key, value in output_dict.items()
+            if key != "action_loss" and torch.is_tensor(value) and value.ndim == 0
+        }
         return {
             "action_dit_loss": action_loss.item(),
+            **motion_metrics,
         }
 
     def _finalize_training(self):

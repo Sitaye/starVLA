@@ -57,6 +57,7 @@ from typing import Tuple, List
 import pickle
 import gc
 import multiprocessing as mp
+from starVLA.dataloader.flow_cache import FlowTargetCache
 
 # LeRobot v2.0 dataset file names 
 LE_ROBOT_MODALITY_FILENAME = "meta/modality.json"
@@ -2227,6 +2228,8 @@ class LeRobotMixtureDataset(Dataset):
         self.mode = mode
         self._shared_epoch = mp.Value("i", 0)
         self.data_cfg = kwargs["data_cfg"] if "data_cfg" in kwargs else None
+        motion_flow_root = self.data_cfg.get("motion_flow_root", None) if self.data_cfg is not None else None
+        self.flow_cache = FlowTargetCache(motion_flow_root) if motion_flow_root else None
         self.drop_incomplete_action_chunks = bool(
             self.data_cfg.get("drop_incomplete_action_chunks", False)
             if self.data_cfg is not None
@@ -2462,7 +2465,8 @@ class LeRobotMixtureDataset(Dataset):
                 raw_data = dataset.get_step_data(trajectory_id, step)    
                 data = dataset.transforms(raw_data)
                 sample = dataset._pack_sample(data)
-                
+                if self.flow_cache is not None:
+                    sample["flow_target"] = self.flow_cache.get(dataset.dataset_name, trajectory_id, step)
                 return sample
                 
             except Exception as e:

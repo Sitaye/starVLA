@@ -46,7 +46,7 @@ dependencies = [
     "pydantic",
     "pyarrow",
     "fastparquet",
-    "av",
+    "av==12.3.0",
     "numpydantic",
     "deepspeed",
     "qwen-vl-utils",
@@ -136,19 +136,19 @@ ignore = ["F722"]
 
 [tool.uv.sources]
 torch = [
-  { index = "pytorch-cu121" },
+  { index = "pytorch-cu124" },
 ]
 torchvision = [
-  { index = "pytorch-cu121" },
+  { index = "pytorch-cu124" },
+]
+flash-attn = [
+  { url = "https://v6.gh-proxy.org/https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" },
+]
+causal-conv1d = [
+  { url = "https://v6.gh-proxy.org/https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.5.0.post8/causal_conv1d-1.5.0.post8+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" },
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
-
-[tool.uv]
-no-build-isolation-package = [
-    "flash-attn",
-    "causal-conv1d",
-]
