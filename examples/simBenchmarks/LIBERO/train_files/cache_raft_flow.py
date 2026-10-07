@@ -47,7 +47,7 @@ def main():
         type=str,
         default="examples/simBenchmarks/LIBERO/train_files/starvla_cotrain_libero.yaml",
     )
-    parser.add_argument("--output_root", type=str, default="./playground/RaftFlowCache")
+    parser.add_argument("--output_root", type=str, default="/root/autodl-tmp/flow_cache/")
     parser.add_argument("--delta_t", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument(
@@ -62,7 +62,7 @@ def main():
     parser.add_argument(
         "--video_backend",
         type=str,
-        default=None,
+        default="pyav",
         help="Override datasets.vla_data.video_backend for this cache run only; "
         "use pyav to avoid the torchvision_av decoder memory leak",
     )

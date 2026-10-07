@@ -55,7 +55,6 @@ from starVLA.dataloader.gr00t_lerobot.transform.state_action import StateActionT
 from functools import partial
 from typing import Tuple, List
 import pickle
-import gc
 import multiprocessing as mp
 from starVLA.dataloader.flow_cache import FlowTargetCache
 
@@ -2428,8 +2427,6 @@ class LeRobotMixtureDataset(Dataset):
             dict: The data for the trajectory and start index.
         """
         self._getitem_count += 1
-        if self._getitem_count % 1000 == 0:
-            gc.collect()
 
         max_retries = 10
         last_exception = None
