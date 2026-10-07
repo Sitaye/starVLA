@@ -46,9 +46,9 @@ class MotionHead(nn.Module):
         layers += [nn.Linear(d, 2)]
         self.net = nn.Sequential(*layers)
 
-    def forward(self, H_vis: torch.Tensor) -> torch.Tensor:
+    def forward(self, E_vis: torch.Tensor) -> torch.Tensor:
         """
-        :param H_vis: torch.Tensor, [B, V, H_tok, W_tok, D] visual token representations.
+        :param E_vis: torch.Tensor, [B, V, H_tok, W_tok, D] visual token representations.
         :return: torch.Tensor, [B, V, H_tok, W_tok, 2] predicted per-token flow.
         """
-        return self.net(H_vis)
+        return self.net(E_vis)

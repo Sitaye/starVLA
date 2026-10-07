@@ -25,7 +25,6 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from PIL import Image
 
 from deployment.model_server.tools.image_tools import to_pil_preserve
@@ -271,38 +270,53 @@ class Qwenvl_OFT(baseframework):
                 ).float()  # [B, V, Ht, Wt, 2]; NaN marks anchors whose future frame left the episode
                 visual_mask = qwen_inputs["input_ids"] == self.qwen_vl_interface.model.config.image_token_id
                 num_views = len(examples[0]["image"])
-                H_vis = self._gather_visual_token_embeddings(
-                    last_hidden, visual_mask, qwen_inputs["image_grid_thw"], num_views
+                E_vis = self._gather_visual_token_embeddings(
+                    entry_embeds, visual_mask, qwen_inputs["image_grid_thw"], num_views
                 )  # [B, V, Ht, Wt, D]
-                per_token_motion_loss, motion_valid = token_motion_loss(self.motion_head(H_vis), motion_target)
+                per_token_motion_loss, motion_valid = token_motion_loss(self.motion_head(E_vis), motion_target)
                 num_valid = motion_valid.sum()
-                g_A = self._gather_visual_token_embeddings(
-                    torch.autograd.grad(action_loss, entry_embeds, retain_graph=True)[0],
-                    visual_mask,
-                    qwen_inputs["image_grid_thw"],
-                    num_views,
-                )  # [B, V, Ht, Wt, D]
-                motion_scalar = per_token_motion_loss[motion_valid].mean()
-                g_M = self._gather_visual_token_embeddings(
-                    torch.autograd.grad(motion_scalar, entry_embeds, retain_graph=True)[0],
-                    visual_mask,
-                    qwen_inputs["image_grid_thw"],
-                    num_views,
-                )  # [B, V, Ht, Wt, D]
-                if self.motion_mode == "uniform":
-                    compat = F.cosine_similarity(g_A.float(), g_M.float(), dim=-1)
-                    w = torch.ones_like(per_token_motion_loss) * motion_valid
+                w, compat = None, None
+                if self.motion_mode in ("compat", "random", "shuffled"):
+                    if num_valid > 0:
+                        if self.motion_mode == "random":
+                            # Random draws C ~ U(-1,1), independent of real gradients.
+                            w, compat = motion_credit(
+                                per_token_motion_loss, None, None, motion_valid, self.motion_mode
+                            )
+                        else:
+                            g_A = self._gather_visual_token_embeddings(
+                                torch.autograd.grad(action_loss, entry_embeds, retain_graph=True)[0],
+                                visual_mask,
+                                qwen_inputs["image_grid_thw"],
+                                num_views,
+                            )  # [B, V, Ht, Wt, D]
+                            motion_scalar = per_token_motion_loss[motion_valid].mean()
+                            g_M = self._gather_visual_token_embeddings(
+                                torch.autograd.grad(motion_scalar, entry_embeds, retain_graph=True)[0],
+                                visual_mask,
+                                qwen_inputs["image_grid_thw"],
+                                num_views,
+                            )  # [B, V, Ht, Wt, D]
+                            w, compat = motion_credit(per_token_motion_loss, g_A, g_M, motion_valid, self.motion_mode)
+                    else:
+                        w = torch.zeros_like(per_token_motion_loss)
                 else:
-                    w, compat = motion_credit(per_token_motion_loss, g_A, g_M, motion_valid, self.motion_mode)
-                motion_loss = (w * per_token_motion_loss * motion_valid).sum() / num_valid.clamp(min=1)
+                    w = motion_valid.to(per_token_motion_loss.dtype)
+                motion_loss = (w * per_token_motion_loss).sum() / num_valid.clamp(min=1)
 
                 result_motion = {
                     "motion_loss": motion_loss.detach(),
-                    "motion_compat_mean": (compat * motion_valid).sum() / num_valid.clamp(min=1),
-                    "motion_norm_ratio": g_A.float().norm(dim=-1)[motion_valid].mean()
-                    / g_M.float().norm(dim=-1)[motion_valid].mean().clamp(min=1e-6),
                     "motion_valid_frac": num_valid.float() / motion_valid.numel(),
                 }
+                if compat is not None:
+                    gA_norm = g_A.float().norm(dim=-1)[motion_valid].mean()
+                    gM_norm = g_M.float().norm(dim=-1)[motion_valid].mean()
+                    result_motion["motion_compat_mean"] = (compat * motion_valid).sum() / num_valid.clamp(min=1)
+                    result_motion["motion_compat_std"] = compat[motion_valid].std(correction=0)
+                    result_motion["motion_w_std"] = w[motion_valid].std(correction=0)
+                    result_motion["motion_gA_norm_mean"] = gA_norm
+                    result_motion["motion_gM_norm_mean"] = gM_norm
+                    result_motion["motion_norm_ratio"] = gA_norm / gM_norm.clamp(min=1e-6)
 
             if motion_loss is None:
                 total_loss = action_loss
@@ -429,8 +443,10 @@ class Qwenvl_OFT(baseframework):
         Visual tokens appear in the sequence view-major per sample and row-major within
         each image, matching the message order produced by the processor.
         """
-        token_hw = (int(image_grid_thw[0, 1]) // 2, int(image_grid_thw[0, 2]) // 2)
         B = features.shape[0]
+        if image_grid_thw.shape[0] != B * num_views or not torch.all(image_grid_thw == image_grid_thw[0]):
+            raise RuntimeError("inconsistent image_grid_thw across batch views")
+        token_hw = (int(image_grid_thw[0, 1]) // 2, int(image_grid_thw[0, 2]) // 2)
         return features[visual_mask].view(B, num_views, token_hw[0], token_hw[1], *features.shape[2:])
 
     # Discretised state → instruction prefix (π₀.5 style); shared with QwenPI_v3.
