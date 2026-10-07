@@ -57,10 +57,8 @@ from starVLA.model.modules.action_model.MLP_ActionHeader import get_action_model
 from starVLA.model.modules.motion.head import MotionHead
 from starVLA.model.modules.motion.loss import motion_credit, token_motion_loss
 from starVLA.model.modules.vlm import get_vlm_model
-from starVLA.model.modules.vlm.QWen3_5 import qwen_apply_processor, qwen_build_messages
+from starVLA.model.modules.vlm.QWen3_5 import ACTION_TOKEN, qwen_apply_processor, qwen_build_messages
 from starVLA.training.trainer_utils.trainer_tools import resize_images
-
-ACTION_TOKEN = "△"
 
 
 def assemble_prompts(examples: List[dict], chunk_len: int, action_token: str) -> List[str]:
@@ -174,7 +172,7 @@ class Qwenvl_OFT(baseframework):
         # self.hidden_dim = config.framework.action_model.action_hidden_dim
 
         self.action_token = ACTION_TOKEN  # TODO also can add spacail token to Qwen, but too complex
-        self.action_token_id = self.qwen_vl_interface.processor.tokenizer("△", add_special_tokens=False)["input_ids"][0]
+        self.action_token_id = self.qwen_vl_interface.action_token_id
 
         motion_cfg = self.config.framework.get("motion", None)
         self.motion_mode = motion_cfg.get("mode", "uniform") if motion_cfg else None

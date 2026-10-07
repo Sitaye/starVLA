@@ -26,6 +26,7 @@ VIDEO_TOKEN_INDEX = 248057
 DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_VIDEO_TOKEN = "<video>"
 
+ACTION_TOKEN = "<robot_action>"
 _ACTION_TOKEN_MIN = 248077  # how can we know this range? check how you add fast tokens into VLM
 _ACTION_TOKEN_MAX = (
     248077 + 2047
@@ -102,6 +103,14 @@ class _QWen3_5_VL_Interface(nn.Module):
         self.model = model
         self.processor = processor
         self.config = config
+
+        action_token_id = processor.tokenizer.convert_tokens_to_ids(ACTION_TOKEN)
+        if action_token_id is None or action_token_id < 0:
+            processor.tokenizer.add_tokens([ACTION_TOKEN])
+            if len(processor.tokenizer) > model.get_input_embeddings().weight.shape[0]:
+                model.resize_token_embeddings(len(processor.tokenizer))
+            action_token_id = processor.tokenizer.convert_tokens_to_ids(ACTION_TOKEN)
+        self.action_token_id = action_token_id
 
         # alin qwen3.5 with qwen2.5
         self.model.config.hidden_size = self.model.config.text_config.hidden_size

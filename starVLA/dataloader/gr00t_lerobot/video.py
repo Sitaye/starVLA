@@ -186,6 +186,7 @@ def get_frames_by_timestamps(
         try:
             container = av.open(video_path)
             stream = container.streams.video[0]
+            stream.codec_context.thread_count = 1
             
             # Get video properties
             time_base = float(stream.time_base)
