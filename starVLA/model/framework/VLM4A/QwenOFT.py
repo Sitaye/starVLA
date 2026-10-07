@@ -218,6 +218,15 @@ class Qwenvl_OFT(baseframework):
         action_masks = [example.get("action_mask") for example in examples]
         if any(mask is not None for mask in action_masks) and not all(mask is not None for mask in action_masks):
             raise ValueError("action_mask must be present for every example in a batch or for none")
+        entry_embeds = None
+
+        def _stash_entry_embeds(module, args, kwargs):
+            nonlocal entry_embeds
+            entry_embeds = kwargs["inputs_embeds"]
+
+        hook_handle = self.qwen_vl_interface.model.model.language_model.register_forward_pre_hook(
+            _stash_entry_embeds, with_kwargs=True
+        )
         with torch.autocast("cuda", dtype=torch.bfloat16):
             qwenvl_outputs = self.qwen_vl_interface.model.model(
                 **qwen_inputs,
@@ -226,6 +235,7 @@ class Qwenvl_OFT(baseframework):
             )
             # last_hidden_state: [B, seq_len, H]
             last_hidden = qwenvl_outputs.last_hidden_state  # [B, L, H]
+        hook_handle.remove()
 
         # Step 4: Action Expert Forward and Loss
         with torch.autocast("cuda", dtype=torch.float32):
@@ -267,14 +277,14 @@ class Qwenvl_OFT(baseframework):
                 per_token_motion_loss, motion_valid = token_motion_loss(self.motion_head(H_vis), motion_target)
                 num_valid = motion_valid.sum()
                 g_A = self._gather_visual_token_embeddings(
-                    torch.autograd.grad(action_loss, last_hidden, retain_graph=True)[0],
+                    torch.autograd.grad(action_loss, entry_embeds, retain_graph=True)[0],
                     visual_mask,
                     qwen_inputs["image_grid_thw"],
                     num_views,
                 )  # [B, V, Ht, Wt, D]
                 motion_scalar = per_token_motion_loss[motion_valid].mean()
                 g_M = self._gather_visual_token_embeddings(
-                    torch.autograd.grad(motion_scalar, last_hidden, retain_graph=True)[0],
+                    torch.autograd.grad(motion_scalar, entry_embeds, retain_graph=True)[0],
                     visual_mask,
                     qwen_inputs["image_grid_thw"],
                     num_views,
