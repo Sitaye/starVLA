@@ -23,11 +23,12 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 import torchvision
 from PIL import Image
 from omegaconf import OmegaConf
 from torchvision.models.optical_flow import Raft_Large_Weights, raft_large
-import torch
+from torchvision.transforms.functional import pil_to_tensor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
@@ -85,8 +86,8 @@ def main():
         f"patch={patch} merge={merge} -> token_grid={token_hw}"
     )
 
-    raft = raft_large(weights=Raft_Large_Weights.C_T_V2).to(device).eval()
-    raft_transforms = Raft_Large_Weights.C_T_V2.transforms()
+    raft = raft_large(weights=Raft_Large_Weights.DEFAULT).to(device).eval()
+    raft_transforms = Raft_Large_Weights.DEFAULT.transforms()
 
     for data_name, _, robot_type in DATASET_NAMED_MIXTURES[data_cfg.data_mix]:
         dataset = make_LeRobotSingleDataset(data_root_dir, data_name, robot_type, data_cfg=data_cfg)
@@ -193,11 +194,13 @@ def main():
                 flow_pairs = []
                 for batch_start in range(0, len(img1_batch), args.batch_size):
                     img1 = torch.stack(
-                        [raft_transforms(img) for img in img1_batch[batch_start : batch_start + args.batch_size]]
-                    ).to(device)
+                        [pil_to_tensor(im) for im in img1_batch[batch_start : batch_start + args.batch_size]]
+                    )
                     img2 = torch.stack(
-                        [raft_transforms(img) for img in img2_batch[batch_start : batch_start + args.batch_size]]
-                    ).to(device)
+                        [pil_to_tensor(im) for im in img2_batch[batch_start : batch_start + args.batch_size]]
+                    )
+                    img1, img2 = raft_transforms(img1, img2)
+                    img1, img2 = img1.to(device), img2.to(device)
                     with torch.inference_mode():
                         flow_full = raft(img1, img2)[-1]  # [B, 2, H, W]
                     flow_pairs.append(flow_to_token_grid(flow_full.float().cpu(), token_hw).numpy())
@@ -215,7 +218,7 @@ def main():
             "stride": image_size[1] // token_hw[1],
             "delta_step": args.delta_t,
             "unit": "token-cell displacement (area-pooled RAFT flow divided by token stride)",
-            "teacher": "torchvision.raft_large weights=Raft_Large_Weights.C_T_V2",
+            "teacher": "torchvision.raft_large weights=Raft_Large_Weights.DEFAULT",
             "torchvision_version": torchvision.__version__,
             "views": list(video_keys),
             "num_rows": len(all_steps),
