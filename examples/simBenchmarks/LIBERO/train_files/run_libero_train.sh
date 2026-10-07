@@ -12,13 +12,13 @@ export TOKENIZERS_PARALLELISM=false
 # === Please modify the following paths according to your environment ===
 Framework_name=QwenOFT
 freeze_module_list=''
-base_vlm=playground/Pretrained_models/Qwen3.5-0.8B
+base_vlm=/root/autodl-tmp/models/Qwen3.5-0.8B/
 config_yaml=./examples/simBenchmarks/LIBERO/train_files/starvla_cotrain_libero.yaml
-libero_data_root=/defaultShare/pubdata/OXE_LEROBOT_DATASET/libero_no_noops_1.0.0_lerobot/
+libero_data_root=/root/autodl-tmp/datasets/
 data_mix=libero_all
 seed=42
 num_workers=8
-run_root_dir=./playground/Checkpoints
+run_root_dir=/root/autodl-tmp/checkpoints/
 run_id=$(date +%Y%m%d_%H%M%S)_baseline
 # === End of environment variable configuration ===
 ###########################################################################################
