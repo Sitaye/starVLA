@@ -239,12 +239,12 @@ class Qwenvl_OFT(baseframework):
         hook_handle.remove()
 
         # Step 4: Action Expert Forward and Loss
-        with torch.autocast("cuda", enabled=False):
+        with torch.autocast("cuda", dtype=torch.float32):
             # Extract action token embeddings as action prediction queries
             input_ids = qwen_inputs.get("input_ids", None)
             action_queries = self._gather_action_token_embeddings(
                 last_hidden, input_ids, action_token_id=self.action_token_id
-            ).float()  # [B, chunk_len, H]
+            )  # [B, chunk_len, H]
             pred_actions = self.action_model.predict_action(action_queries)  # (B, chunk_len, action_dim)
 
             # Label alignment: take the last chunk_len segment
@@ -383,12 +383,12 @@ class Qwenvl_OFT(baseframework):
             last_hidden = qwenvl_outputs.last_hidden_state  # [B, L, H]
 
         # Step 4: Action Expert Forward and Loss
-        with torch.autocast("cuda", enabled=False):
+        with torch.autocast("cuda", dtype=torch.float32):
             # Extract action token embeddings as action prediction queries
             input_ids = qwen_inputs.get("input_ids", None)
             action_queries = self._gather_action_token_embeddings(
                 last_hidden, input_ids, action_token_id=self.action_token_id
-            ).float()  # [B, chunk_len, H]
+            )  # [B, chunk_len, H]
             pred_actions = self.action_model.predict_action(action_queries)  # (B, chunk_len, action_dim)
 
         normalized_actions = pred_actions.detach().cpu().numpy()
