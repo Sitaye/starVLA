@@ -28,6 +28,7 @@ def motion_credit(
     g_M_tok: torch.Tensor | None,
     valid: torch.Tensor,
     w_mode: str = "compat",
+    tau: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """
     Compatibility-aware credit assignment for motion supervision.
@@ -35,16 +36,20 @@ def motion_credit(
     C_ij  = cos_fp32(g_A_ij, g_M_ij): per-token alignment between the action
             gradient and motion gradient at the representation coordinate, or 0
             when either gradient vanishes at that token.
-    w_ij  = (1 + C_ij) / (mean_valid(1 + C) + eps): normalized to mean 1 over the
-            valid tokens of each sample, so L_M^AC keeps the same scale as the
-            uniform mean and only redistributes credit across tokens.
+    w_ij  = exp(C_ij / tau) / mean_valid(exp(C / tau)): temperature-softmax
+            mapping normalized to mean 1 over the valid tokens of each sample, so
+            L_M^AC keeps the same scale as the uniform mean and only redistributes
+            credit across tokens (tau=1 approximates the linear 1 + C mapping).
     L_M^AC = (1/N_valid) * sum_ij stopgrad(w_ij) * L_ij
 
     Matched controls for the experiment matrix reuse the same pipeline:
-    w_mode="random" replaces C with iid U(-1,1) (1 + C stays nonnegative, so the
-    control can never turn the motion loss adversarial); it consumes no real
-    gradients, so g_A_tok/g_M_tok may be None and compat is reported as None
-    (per-token w statistics of a random draw carry no diagnostic value).
+    w_mode="random" keeps the exp(C / tau) credit mapping but replaces the
+    learned C with a per-view scale-matched Gaussian (mean/std of the true
+    compat over each view's valid anchors, clipped to [-1, 1]), so each
+    view's spatial-variation magnitude matches its own Compat statistics
+    with a random claim assignment; it still consumes the real gradients for
+    the statistics, and compat is reported as None (per-token w statistics of
+    a random draw carry no diagnostic value).
     w_mode="shuffled" permutes the learned C within the valid anchors of each
     (sample, view) (bijective, so E[w]=1 survives; the per-view valid C
     distribution is preserved, only the w_ij <-> spatial correspondence is
@@ -52,17 +57,26 @@ def motion_credit(
     pre-permutation map.
 
     :param per_token_motion_loss: torch.Tensor, [B, V, H_tok, W_tok].
-    :param g_A_tok: torch.Tensor [B, V, H_tok, W_tok, D], action-loss gradient at visual
-        tokens; None for w_mode="random".
-    :param g_M_tok: torch.Tensor [B, V, H_tok, W_tok, D], motion-loss gradient at visual
-        tokens; None for w_mode="random".
+    :param g_A_tok: torch.Tensor [B, V, H_tok, W_tok, D], action-loss gradient at visual tokens.
+    :param g_M_tok: torch.Tensor [B, V, H_tok, W_tok, D], motion-loss gradient at visual tokens.
     :param valid: torch.Tensor, [B, V, H_tok, W_tok] bool, anchors with RAFT supervision.
     :param w_mode: str, one of {"compat", "random", "shuffled"}.
+    :param tau: float, temperature of the exp(C / tau) credit mapping; smaller tau
+        sharpens the spatial contrast of w.
     :return: (w [B, V, H_tok, W_tok] detached, compat [B, V, H_tok, W_tok] detached or None for w_mode="random").
     """
     if w_mode == "random":
         compat = None
-        C_source = torch.rand_like(per_token_motion_loss) * 2.0 - 1.0
+        g_A = g_A_tok.float()
+        g_M = g_M_tok.float()
+        c_raw = F.cosine_similarity(g_A, g_M, dim=-1)  # [B, V, H_tok, W_tok]
+        c_raw = torch.where((g_A.norm(dim=-1) > 0) & (g_M.norm(dim=-1) > 0), c_raw, torch.zeros_like(c_raw))
+        valid_f = valid.float()
+        count = valid_f.sum(dim=(2, 3), keepdim=True).clamp_min(1)
+        c_mu = (c_raw * valid_f).sum(dim=(2, 3), keepdim=True) / count
+        c_std = (((c_raw - c_mu) * valid_f) ** 2).sum(dim=(2, 3), keepdim=True) / count
+        c_std = c_std.sqrt()
+        C_source = (c_mu + c_std * torch.randn_like(c_raw)).clamp(-1.0, 1.0)
     else:
         g_A = g_A_tok.float()
         g_M = g_M_tok.float()
@@ -80,7 +94,12 @@ def motion_credit(
             C_source = C_source.view_as(compat)
         else:
             C_source = compat
-    base = 1.0 + C_source
-    base = torch.where(valid, base, torch.zeros_like(base))  # invalid anchors get w=0 by construction
-    w = base / (base.sum(dim=(1, 2, 3), keepdim=True) / valid.sum(dim=(1, 2, 3), keepdim=True).clamp(min=1) + 1e-6)
+    z = C_source / tau
+    z = z.masked_fill(~valid, float("-inf"))
+    z = z - z.amax(dim=(1, 2, 3), keepdim=True)
+    base = torch.exp(z)
+    base = torch.where(valid, base, torch.zeros_like(base))
+    w = base / (
+        base.sum(dim=(1, 2, 3), keepdim=True) / valid.sum(dim=(1, 2, 3), keepdim=True).clamp_min(1)
+    ).clamp_min(1e-12)
     return w.detach(), None if compat is None else compat.detach()

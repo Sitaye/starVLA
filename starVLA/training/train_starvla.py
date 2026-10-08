@@ -413,22 +413,23 @@ class VLATrainer(TrainerUtils):
         """Execute single training step."""
         if hasattr(self.model, "is_gradient_accumulation_boundary") and hasattr(self.model, "backward"):
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                output_dict = self.model.forward(batch_vla)
-                action_loss = output_dict["action_loss"]
+                output_dict = self.model.forward(batch_vla, step=self.completed_steps)
+                total_loss = output_dict["total_loss"]
 
-            self.model.backward(action_loss)
+            self.model.backward(total_loss)
             optimizer_stepped = bool(self.model.is_gradient_accumulation_boundary())
             self.model.step()
             if optimizer_stepped:
                 self.lr_scheduler.step()
 
+            excluded = ("action_loss", "total_loss", "pure_action_loss")
             motion_metrics = {
                 key: value.item()
                 for key, value in output_dict.items()
-                if key != "action_loss" and torch.is_tensor(value) and value.ndim == 0
+                if key not in excluded and torch.is_tensor(value) and value.ndim == 0
             }
             return {
-                "action_dit_loss": action_loss.item(),
+                "action_loss": output_dict["pure_action_loss"].item(),
                 **motion_metrics,
                 "optimizer_stepped": optimizer_stepped,
             }
@@ -437,9 +438,8 @@ class VLATrainer(TrainerUtils):
             self.optimizer.zero_grad()
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                output_dict = self.model.forward(batch_vla)
-                action_loss = output_dict["action_loss"]
-                total_loss = action_loss
+                output_dict = self.model.forward(batch_vla, step=self.completed_steps)
+                total_loss = output_dict["total_loss"]
 
             self.accelerator.backward(total_loss)
 
@@ -455,13 +455,14 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 self.lr_scheduler.step()
 
+        excluded = ("action_loss", "total_loss", "pure_action_loss")
         motion_metrics = {
             key: value.item()
             for key, value in output_dict.items()
-            if key != "action_loss" and torch.is_tensor(value) and value.ndim == 0
+            if key not in excluded and torch.is_tensor(value) and value.ndim == 0
         }
         return {
-            "action_dit_loss": action_loss.item(),
+            "action_loss": output_dict["pure_action_loss"].item(),
             **motion_metrics,
         }
 

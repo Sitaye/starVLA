@@ -19,7 +19,8 @@ framework:
     action_horizon: 8
   motion:
     mode: compat
-    loss_weight: 1.0
+    loss_weight: 2.0
+    credit_temperature: 0.5
 
 datasets:
   vlm_data:

@@ -179,6 +179,8 @@ class Qwenvl_OFT(baseframework):
             if self.motion_mode not in ("uniform", "compat", "random", "shuffled"):
                 raise ValueError(f"unsupported framework.motion.mode {self.motion_mode}")
             self.motion_loss_weight = float(motion_cfg.get("loss_weight", 1.0))
+            self.motion_credit_tau = float(motion_cfg.get("credit_temperature", 1.0))
+            self.motion_warmup_steps = int(self.config.trainer.num_warmup_steps)
             self.motion_head = MotionHead(self.qwen_vl_interface.model.config.hidden_size)
 
     def forward(
@@ -237,12 +239,12 @@ class Qwenvl_OFT(baseframework):
         hook_handle.remove()
 
         # Step 4: Action Expert Forward and Loss
-        with torch.autocast("cuda", dtype=torch.float32):
+        with torch.autocast("cuda", enabled=False):
             # Extract action token embeddings as action prediction queries
             input_ids = qwen_inputs.get("input_ids", None)
             action_queries = self._gather_action_token_embeddings(
                 last_hidden, input_ids, action_token_id=self.action_token_id
-            )  # [B, chunk_len, H]
+            ).float()  # [B, chunk_len, H]
             pred_actions = self.action_model.predict_action(action_queries)  # (B, chunk_len, action_dim)
 
             # Label alignment: take the last chunk_len segment
@@ -259,7 +261,12 @@ class Qwenvl_OFT(baseframework):
             action_loss = masked_l1_loss(pred_actions, actions_target, action_mask)
 
             motion_loss, compat = None, None
+            total_loss = action_loss
             if self.motion_mode is not None:
+                step = kwargs.get("step")
+                lam = self.motion_loss_weight
+                if step is not None and self.motion_warmup_steps:
+                    lam = lam * min(step / self.motion_warmup_steps, 1.0)
                 if "flow_target" not in examples[0]:
                     raise ValueError(
                         "framework.motion is enabled but flow_target is missing from the batch; "
@@ -273,31 +280,26 @@ class Qwenvl_OFT(baseframework):
                 E_vis = self._gather_visual_token_embeddings(
                     entry_embeds, visual_mask, qwen_inputs["image_grid_thw"], num_views
                 )  # [B, V, Ht, Wt, D]
-                per_token_motion_loss, motion_valid = token_motion_loss(self.motion_head(E_vis), motion_target)
+                per_token_motion_loss, motion_valid = token_motion_loss(self.motion_head(E_vis.float()), motion_target)
                 num_valid = motion_valid.sum()
-                w, compat = None, None
                 if self.motion_mode in ("compat", "random", "shuffled"):
                     if num_valid > 0:
-                        if self.motion_mode == "random":
-                            # Random draws C ~ U(-1,1), independent of real gradients.
-                            w, compat = motion_credit(
-                                per_token_motion_loss, None, None, motion_valid, self.motion_mode
-                            )
-                        else:
-                            g_A = self._gather_visual_token_embeddings(
-                                torch.autograd.grad(action_loss, entry_embeds, retain_graph=True)[0],
-                                visual_mask,
-                                qwen_inputs["image_grid_thw"],
-                                num_views,
-                            )  # [B, V, Ht, Wt, D]
-                            motion_scalar = per_token_motion_loss[motion_valid].mean()
-                            g_M = self._gather_visual_token_embeddings(
-                                torch.autograd.grad(motion_scalar, entry_embeds, retain_graph=True)[0],
-                                visual_mask,
-                                qwen_inputs["image_grid_thw"],
-                                num_views,
-                            )  # [B, V, Ht, Wt, D]
-                            w, compat = motion_credit(per_token_motion_loss, g_A, g_M, motion_valid, self.motion_mode)
+                        g_A = self._gather_visual_token_embeddings(
+                            torch.autograd.grad(action_loss, entry_embeds, retain_graph=True)[0],
+                            visual_mask,
+                            qwen_inputs["image_grid_thw"],
+                            num_views,
+                        )  # [B, V, Ht, Wt, D]
+                        motion_scalar = per_token_motion_loss[motion_valid].mean()
+                        g_M = self._gather_visual_token_embeddings(
+                            torch.autograd.grad(motion_scalar, entry_embeds, retain_graph=True)[0],
+                            visual_mask,
+                            qwen_inputs["image_grid_thw"],
+                            num_views,
+                        )  # [B, V, Ht, Wt, D]
+                        w, compat = motion_credit(
+                            per_token_motion_loss, g_A, g_M, motion_valid, self.motion_mode, self.motion_credit_tau
+                        )
                     else:
                         w = torch.zeros_like(per_token_motion_loss)
                 else:
@@ -307,23 +309,38 @@ class Qwenvl_OFT(baseframework):
                 result_motion = {
                     "motion_loss": motion_loss.detach(),
                     "motion_valid_frac": num_valid.float() / motion_valid.numel(),
+                    "motion_lambda": action_loss.new_tensor(lam),
                 }
                 if compat is not None:
-                    gA_norm = g_A.float().norm(dim=-1)[motion_valid].mean()
-                    gM_norm = g_M.float().norm(dim=-1)[motion_valid].mean()
                     result_motion["motion_compat_mean"] = (compat * motion_valid).sum() / num_valid.clamp(min=1)
                     result_motion["motion_compat_std"] = compat[motion_valid].std(correction=0)
                     result_motion["motion_w_std"] = w[motion_valid].std(correction=0)
-                    result_motion["motion_gA_norm_mean"] = gA_norm
-                    result_motion["motion_gM_norm_mean"] = gM_norm
-                    result_motion["motion_norm_ratio"] = gA_norm / gM_norm.clamp(min=1e-6)
+                    result_motion["motion_w_eff_ratio"] = num_valid.float() / (
+                        (w * w)[motion_valid].sum().clamp(min=1e-12)
+                    )
+                    gA_eff = g_A.float()
+                    gM_eff = lam * w.float().unsqueeze(-1) * g_M.float()
+                    gA_vec = gA_eff.reshape(-1)
+                    gM_vec = gM_eff.reshape(-1)
+                    gA_norm_global = gA_vec.norm().clamp(min=1e-6)
+                    update_vec = gA_vec + gM_vec
+                    result_motion["motion_repr_rho_aux"] = gM_vec.norm() / gA_norm_global
+                    result_motion["motion_repr_update_angle"] = torch.rad2deg(
+                        torch.arccos(
+                            ((gA_vec * update_vec).sum() / (gA_norm_global * update_vec.norm().clamp(min=1e-6)))
+                            .clamp(min=-1.0, max=1.0)
+                        )
+                    )
+                    result_motion["motion_repr_action_projection"] = (gA_vec * gM_vec).sum() / (
+                        (gA_vec * gA_vec).sum().clamp(min=1e-6)
+                    )
+                    result_motion["motion_repr_rho_valid"] = gM_eff[motion_valid].norm() / gA_eff[
+                        motion_valid
+                    ].norm().clamp(min=1e-6)
 
-            if motion_loss is None:
-                total_loss = action_loss
-            else:
-                total_loss = action_loss + self.motion_loss_weight * motion_loss
+                total_loss = action_loss + lam * motion_loss
 
-        result = {"action_loss": total_loss}
+        result = {"total_loss": total_loss, "pure_action_loss": action_loss.detach()}
         if motion_loss is not None:
             result.update(result_motion)
         return result
@@ -366,12 +383,12 @@ class Qwenvl_OFT(baseframework):
             last_hidden = qwenvl_outputs.last_hidden_state  # [B, L, H]
 
         # Step 4: Action Expert Forward and Loss
-        with torch.autocast("cuda", dtype=torch.float32):
+        with torch.autocast("cuda", enabled=False):
             # Extract action token embeddings as action prediction queries
             input_ids = qwen_inputs.get("input_ids", None)
             action_queries = self._gather_action_token_embeddings(
                 last_hidden, input_ids, action_token_id=self.action_token_id
-            )  # [B, chunk_len, H]
+            ).float()  # [B, chunk_len, H]
             pred_actions = self.action_model.predict_action(action_queries)  # (B, chunk_len, action_dim)
 
         normalized_actions = pred_actions.detach().cpu().numpy()
@@ -494,8 +511,9 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     forward_output = model(batch)
-    action_loss = forward_output["action_loss"]
-    print(f"[train] Action Loss (with state): {action_loss.item()}")
+    total_loss = forward_output["total_loss"]
+    action_loss = forward_output["pure_action_loss"]
+    print(f"[train] total_loss (with state): {total_loss.item()}, pure_action_loss: {action_loss.item()}")
 
     predict_output = model.predict_action(examples=[batch[0]])
     normalized_actions = predict_output["normalized_actions"]
