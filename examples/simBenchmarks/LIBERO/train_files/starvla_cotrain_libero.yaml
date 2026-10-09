@@ -9,7 +9,7 @@ version_id: "0.21"
 framework:
   name: QwenOFT
   qwenvl:
-    base_vlm: /root/autodl-tmp/models/Qwen3.5-0.8B/
+    base_vlm: /defaultShare/archive/linpenghan/models/Qwen3.5-0.8B/
     attn_implementation: flash_attention_2
     vl_hidden_dim: 1024
     preprocess_in_dataloader: true
@@ -38,7 +38,7 @@ datasets:
 
   vla_data:
     dataset_py: lerobot_datasets
-    data_root_dir: /root/autodl-tmp/datasets/
+    data_root_dir: /defaultShare/pubdata/OXE_LEROBOT_DATASET/libero_no_noops_1.0.0_lerobot/
     data_mix: libero_all # libero_goal
     action_type: delta_qpos
     sequential_step_sampling: False
@@ -46,7 +46,7 @@ datasets:
     per_device_batch_size: 16
     load_all_data_for_training: true
     video_backend: pyav
-    motion_flow_root: /root/autodl-tmp/flow_cache/
+    motion_flow_root: /defaultShare/archive/linpenghan/cvpr27/flow_cache/
 
 trainer:
   max_train_steps: 100000

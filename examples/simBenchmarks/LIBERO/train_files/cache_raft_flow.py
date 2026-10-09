@@ -47,7 +47,7 @@ def main():
         type=str,
         default="examples/simBenchmarks/LIBERO/train_files/starvla_cotrain_libero.yaml",
     )
-    parser.add_argument("--output_root", type=str, default="/root/autodl-tmp/flow_cache/")
+    parser.add_argument("--output_root", type=str, default="/defaultShare/archive/linpenghan/cvpr27/flow_cache/")
     parser.add_argument("--delta_t", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument(
@@ -62,7 +62,7 @@ def main():
     parser.add_argument(
         "--video_backend",
         type=str,
-        default="pyav",
+        default=None,
         help="Override datasets.vla_data.video_backend for this cache run only; "
         "use pyav to avoid the torchvision_av decoder memory leak",
     )
@@ -129,7 +129,7 @@ def main():
             cached = np.load(flow_path, mmap_mode="r")
             shape_ok = cached.shape[1:] == (len(video_keys), token_hw[0], token_hw[1], 2)
             if np.array_equal(np.load(keys_path), keys) and shape_ok and not meta_stale:
-                todo_mask = np.isnan(np.asarray(cached[:, 0, 0, 0, 0]))
+                todo_mask = np.isnan(np.asarray(cached)).any(axis=(1, 2, 3, 4))
                 mode = "r+"
             else:
                 print(f"[{data_name}] stale cache (layout/shape/meta mismatch), rebuilding")
