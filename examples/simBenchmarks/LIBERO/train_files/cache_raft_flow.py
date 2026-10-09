@@ -40,6 +40,32 @@ from starVLA.model.modules.motion.head import flow_to_token_grid
 from starVLA.model.modules.vlm.QWen3_5 import build_qwen_processor, qwen_apply_processor, qwen_build_messages
 
 
+def read_frames_pyav_sequential(video_path: str, targets: np.ndarray) -> np.ndarray:
+    """Single-pass decode of one video, capturing the closest-frame for each ascending timestamp target."""
+    container = av.open(video_path)
+    try:
+        stream = container.streams.video[0]
+        stream.codec_context.thread_count = 1
+        time_base = float(stream.time_base)
+        fps = float(stream.average_rate) if stream.average_rate else float(stream.guessed_rate)
+        half_frame = 0.5 / fps
+        frames = []
+        k = 0
+        for frame in container.decode(video=0):
+            ts = float(frame.pts) * time_base
+            while k < len(targets) and abs(ts - float(targets[k])) <= half_frame:
+                frames.append(frame.to_ndarray(format="rgb24"))
+                k += 1
+            if k == len(targets):
+                break
+        if k != len(targets):
+            raise ValueError(f"Unable to find frame at timestamp {targets[k]}")
+        return np.array(frames)
+    finally:
+        if container is not None:
+            container.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -49,7 +75,7 @@ def main():
     )
     parser.add_argument("--output_root", type=str, default="/defaultShare/archive/linpenghan/cvpr27/flow_cache/")
     parser.add_argument("--delta_t", type=int, default=8)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument(
         "--data_root_dir", type=str, default=None, help="Override datasets.vla_data.data_root_dir from the yaml"
     )
@@ -66,6 +92,8 @@ def main():
         help="Override datasets.vla_data.video_backend for this cache run only; "
         "use pyav to avoid the torchvision_av decoder memory leak",
     )
+    parser.add_argument("--num_shards", type=int, default=1)
+    parser.add_argument("--shard_index", type=int, default=0)
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -111,7 +139,7 @@ def main():
     raft = raft_large(weights=Raft_Large_Weights.DEFAULT).to(device).eval()
     raft_transforms = Raft_Large_Weights.DEFAULT.transforms()
 
-    for data_name, _, robot_type in DATASET_NAMED_MIXTURES[data_cfg.data_mix]:
+    for data_name, _, robot_type in list(DATASET_NAMED_MIXTURES[data_cfg.data_mix])[args.shard_index :: args.num_shards]:
         dataset = make_LeRobotSingleDataset(data_root_dir, data_name, robot_type, data_cfg=data_cfg)
         out_dir = Path(args.output_root) / dataset.dataset_name
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -204,18 +232,24 @@ def main():
                 cur_ts = np.concatenate(cur_ts_list)
                 fut_ts = np.concatenate(fut_ts_list)
                 try:
-                    cur_frames = get_frames_by_timestamps(
-                        video_path.as_posix(),
-                        cur_ts,
-                        video_backend=dataset.video_backend,
-                        video_backend_kwargs=dataset.video_backend_kwargs,
-                    )
-                    fut_frames = get_frames_by_timestamps(
-                        video_path.as_posix(),
-                        fut_ts,
-                        video_backend=dataset.video_backend,
-                        video_backend_kwargs=dataset.video_backend_kwargs,
-                    )
+                    if dataset.video_backend == "pyav":
+                        targets = np.unique(np.concatenate([cur_ts, fut_ts]))
+                        all_frames = read_frames_pyav_sequential(video_path.as_posix(), targets)
+                        cur_frames = all_frames[np.searchsorted(targets, cur_ts)]
+                        fut_frames = all_frames[np.searchsorted(targets, fut_ts)]
+                    else:
+                        cur_frames = get_frames_by_timestamps(
+                            video_path.as_posix(),
+                            cur_ts,
+                            video_backend=dataset.video_backend,
+                            video_backend_kwargs=dataset.video_backend_kwargs,
+                        )
+                        fut_frames = get_frames_by_timestamps(
+                            video_path.as_posix(),
+                            fut_ts,
+                            video_backend=dataset.video_backend,
+                            video_backend_kwargs=dataset.video_backend_kwargs,
+                        )
                 except av.error.FFmpegError as e:
                     print(
                         f"[{data_name}] bad video data in {video_path}, leaving "

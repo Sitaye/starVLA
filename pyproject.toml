@@ -60,8 +60,8 @@ dependencies = [
     "websockets",
     "pyzmq",
     "tdigest",
-    "torch",
-    "torchvision",
+    "torch==2.6.0",
+    "torchvision==0.21.0",
     "triton",
     "flash-attn",
     "flash-linear-attention",
@@ -136,26 +136,23 @@ ignore = ["F722"]
 
 [tool.uv.sources]
 torch = [
-  { index = "pytorch-cu121" },
+  { index = "pytorch-cu118" },
 ]
 torchvision = [
-  { index = "pytorch-cu121" },
+  { index = "pytorch-cu118" },
+]
+flash-attn = [
+  { url = "https://ghfast.top/https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.2.post1/flash_attn-2.7.2.post1+cu11torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" },
+]
+causal-conv1d = [
+  { url = "https://ghfast.top/https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu11torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" },
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
-explicit = true
+url = "https://mirrors.cloud.tencent.com/pypi/simple/"
+default = true
 
-[tool.uv.extra-build-dependencies]
-flash-attn = [
-    { requirement = "torch", match-runtime = true },
-    "ninja",
-    "packaging",
-    "psutil",
-]
-causal-conv1d = [
-    { requirement = "torch", match-runtime = true },
-    "ninja",
-    "packaging",
-]
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
