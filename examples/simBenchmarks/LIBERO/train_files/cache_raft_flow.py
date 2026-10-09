@@ -14,7 +14,7 @@ stay NaN so the training side masks them out instead of reading clamped self-flo
 motion) at episode ends. Each directory also gets a meta.json recording the cache contract.
 Rows are aligned with ``dataset.all_steps`` order, so the training-side
 ``FlowTargetCache`` looks samples up by (dataset_name, trajectory_id, step).
-Resume: pending NaN rows of valid anchors are recomputed; invalid rows stay NaN.
+Resume: rows with non-finite targets at valid anchors are recomputed; invalid rows stay NaN.
 """
 
 import argparse
@@ -96,6 +96,18 @@ def main():
         f"patch={patch} merge={merge} -> token_grid={token_hw}"
     )
 
+    contract = {
+        "canonical_size": [image_size[0], image_size[1]],
+        "token_grid": [token_hw[0], token_hw[1]],
+        "patch": patch,
+        "merge": merge,
+        "resized_grid": [grid[1], grid[2]],
+        "stride": image_size[1] // token_hw[1],
+        "delta_step": args.delta_t,
+        "unit": "token-cell displacement (area-pooled RAFT flow divided by token stride)",
+        "teacher": "torchvision.raft_large weights=Raft_Large_Weights.DEFAULT",
+        "torchvision_version": torchvision.__version__,
+    }
     raft = raft_large(weights=Raft_Large_Weights.DEFAULT).to(device).eval()
     raft_transforms = Raft_Large_Weights.DEFAULT.transforms()
 
@@ -125,11 +137,15 @@ def main():
                 cached_meta = json.loads((out_dir / "meta.json").read_text())
             except (OSError, ValueError):
                 pass  # missing/corrupt meta.json -> stale
-            meta_stale = "num_valid_anchors" not in cached_meta
+            meta_stale = (
+                "num_valid_anchors" not in cached_meta
+                or any(cached_meta.get(k) != v for k, v in contract.items())
+                or cached_meta.get("views") != list(video_keys)
+            )
             cached = np.load(flow_path, mmap_mode="r")
             shape_ok = cached.shape[1:] == (len(video_keys), token_hw[0], token_hw[1], 2)
             if np.array_equal(np.load(keys_path), keys) and shape_ok and not meta_stale:
-                todo_mask = np.isnan(np.asarray(cached)).any(axis=(1, 2, 3, 4))
+                todo_mask = (~np.isfinite(np.asarray(cached))).any(axis=(1, 2, 3, 4))
                 mode = "r+"
             else:
                 print(f"[{data_name}] stale cache (layout/shape/meta mismatch), rebuilding")
@@ -226,18 +242,9 @@ def main():
                     np.float16
                 )
         meta = {
+            **contract,
             "dataset": dataset.dataset_name,
             "data_root_dir": str(data_root_dir / data_name),
-            "canonical_size": [image_size[0], image_size[1]],
-            "token_grid": [token_hw[0], token_hw[1]],
-            "patch": patch,
-            "merge": merge,
-            "resized_grid": [grid[1], grid[2]],
-            "stride": image_size[1] // token_hw[1],
-            "delta_step": args.delta_t,
-            "unit": "token-cell displacement (area-pooled RAFT flow divided by token stride)",
-            "teacher": "torchvision.raft_large weights=Raft_Large_Weights.DEFAULT",
-            "torchvision_version": torchvision.__version__,
             "views": list(video_keys),
             "num_rows": len(all_steps),
             "num_valid_anchors": valid_anchor_count,
