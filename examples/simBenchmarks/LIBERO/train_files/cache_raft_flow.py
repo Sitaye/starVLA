@@ -30,6 +30,7 @@ from PIL import Image
 from omegaconf import OmegaConf
 from torchvision.models.optical_flow import Raft_Large_Weights, raft_large
 from torchvision.transforms.functional import pil_to_tensor
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
@@ -195,7 +196,7 @@ def main():
         rows_by_trajectory = {}
         for i in np.flatnonzero(todo_mask):
             rows_by_trajectory.setdefault(all_steps[i][0], []).append(i)
-        for trajectory_id in sorted(rows_by_trajectory):
+        for trajectory_id in tqdm(sorted(rows_by_trajectory), desc=data_name, unit="traj"):
             rows = np.array(rows_by_trajectory[trajectory_id], dtype=np.int64)
             dataset.curr_traj_data = dataset.get_trajectory_data(trajectory_id)
             dataset.curr_traj_id = trajectory_id
