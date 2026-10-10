@@ -10,8 +10,8 @@ handshake. This client therefore no longer needs to:
   - know `future_action_window_size`
   - perform un-normalization
 
-It only handles env-specific adaptation: image history bookkeeping, action
-ensembling, gripper sticky logic, and chunk-cache scheduling.
+It only handles env-specific adaptation: image history bookkeeping, gripper
+sticky logic, and chunk-cache scheduling.
 """
 
 from collections import deque
@@ -22,7 +22,6 @@ import numpy as np
 from PIL import Image
 
 from deployment.model_server.tools.websocket_policy_client import WebsocketClientPolicy
-from examples.simBenchmarks.SimplerEnv.eval_files.adaptive_ensemble import AdaptiveEnsembler
 
 
 class ModelClient:
@@ -31,11 +30,6 @@ class ModelClient:
         unnorm_key: Optional[str] = None,
         policy_setup: str = "franka",
         horizon: int = 0,
-        action_ensemble: bool = True,
-        action_ensemble_horizon: Optional[int] = 3,
-        use_ddim: bool = True,
-        num_ddim_steps: int = 10,
-        adaptive_ensemble_alpha: float = 0.1,
         host: str = "0.0.0.0",
         port: int = 10095,
         image_size: Sequence[int] = (224, 224),
@@ -49,18 +43,14 @@ class ModelClient:
         self.image_size: tuple = tuple(image_size)
         self.policy_setup = policy_setup
         self.unnorm_key = unnorm_key
+
         print(
             f"*** policy_setup: {policy_setup}, unnorm_key: {unnorm_key}, "
             f"action_chunk_size: {self.action_chunk_size}, "
             f"server_meta: {meta} ***"
         )
 
-        self.use_ddim = use_ddim
-        self.num_ddim_steps = num_ddim_steps
         self.horizon = horizon
-        self.action_ensemble = action_ensemble
-        self.adaptive_ensemble_alpha = adaptive_ensemble_alpha
-        self.action_ensemble_horizon = action_ensemble_horizon
 
         # Gripper sticky state (kept for parity with the previous client; not
         # currently consumed by LIBERO but other policy_setup paths use it).
@@ -71,12 +61,6 @@ class ModelClient:
 
         self.task_description = None
         self.image_history = deque(maxlen=self.horizon)
-        if self.action_ensemble:
-            self.action_ensembler = AdaptiveEnsembler(
-                self.action_ensemble_horizon, self.adaptive_ensemble_alpha
-            )
-        else:
-            self.action_ensembler = None
         self.num_image_history = 0
 
         # Cached unnormalized chunk; refreshed every `action_chunk_size` steps.
@@ -89,8 +73,6 @@ class ModelClient:
     def reset(self, task_description: str) -> None:
         self.task_description = task_description
         self.image_history.clear()
-        if self.action_ensemble:
-            self.action_ensembler.reset()
         self.num_image_history = 0
         self.sticky_action_is_on = False
         self.gripper_action_repeat = 0
@@ -112,29 +94,27 @@ class ModelClient:
         if task_description != self.task_description:
             self.reset(task_description)
 
-        # Resize images to self.image_size if needed.
-        if self.image_size and example.get("image"):
-            resized = []
-            target_hw = self.image_size  # (H, W)
-            for img in example["image"]:
-                arr = np.asarray(img)
-                if arr.shape[:2] != target_hw:
-                    arr = np.asarray(
-                        Image.fromarray(arr).resize(
-                            (target_hw[1], target_hw[0]), Image.BILINEAR
-                        )
-                    )
-                resized.append(arr)
-            example = {**example, "image": resized}
-
         # Refresh chunk if needed.
         if step % self.action_chunk_size == 0 or self.raw_actions is None:
+            # Resize images to self.image_size if needed.
+            if self.image_size and example.get("image"):
+                resized = []
+                target_hw = self.image_size  # (H, W)
+                for img in example["image"]:
+                    arr = np.asarray(img)
+                    if arr.shape[:2] != target_hw:
+                        arr = np.asarray(
+                            Image.fromarray(arr).resize(
+                                (target_hw[1], target_hw[0]), Image.BILINEAR
+                            )
+                        )
+                    resized.append(arr)
+                example = {**example, "image": resized}
+
             vla_input = {
                 "examples": [example],
                 "unnorm_key": self.unnorm_key,
                 "do_sample": False,
-                "use_ddim": self.use_ddim,
-                "num_ddim_steps": self.num_ddim_steps,
             }
             # === TRAIN/TEST CONSISTENCY: keep the observation below aligned with training ===
             # Embodied policies degrade SILENTLY (no error) when the eval-time observation
@@ -149,11 +129,11 @@ class ModelClient:
             response = self.client.predict_action(vla_input)
             try:
                 actions_batch = response["data"]["actions"]  # (B, T, D), unnormalized server-side
-            except KeyError:
+            except KeyError as err:
                 raise KeyError(
                     f"Key 'actions' not found in response data: keys={list(response.get('data', {}).keys())}, "
                     f"full response={response}"
-                )
+                ) from err
             self.raw_actions = np.asarray(actions_batch)[0]  # (T, D)
 
         raw_actions = self.raw_actions[step % self.action_chunk_size][None]

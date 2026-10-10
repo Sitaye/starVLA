@@ -187,11 +187,18 @@ class VLATrainer(TrainerUtils):
         if self.accelerator.is_main_process:
             try:
                 swanlab.login(api_key=os.environ.get("SWANLAB_API_KEY"))
+                resume = getattr(self.config, "swanlab_resume", True)
+                if isinstance(resume, str):
+                    low = resume.strip().lower()
+                    resume = {"true": True, "false": False, "0": False, "no": False}.get(low, low)
+                resume_id = getattr(self.config, "swanlab_resume_id", None)
                 swanlab.init(
                     experiment_name=self.config.run_id,
                     logdir=os.path.join(self.config.output_dir, "swanlab"),
                     project=self.config.swanlab_project,
                     group="vla-train",
+                    resume=resume,
+                    id=resume_id or None,
                 )
                 self._swanlab_enabled = True
             except Exception as exc:
@@ -385,7 +392,7 @@ class VLATrainer(TrainerUtils):
         examples = self._get_next_batch()
         actions = [example["action"] for example in examples]
         output_dict = _unwrap_model(self.accelerator, self.model).predict_action(
-            examples=examples, use_ddim=True, num_ddim_steps=20
+            examples=examples
         )
 
         if self.accelerator.is_main_process:

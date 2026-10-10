@@ -4,6 +4,8 @@ import logging
 import math
 import os
 import pathlib
+import queue
+import threading
 import time
 
 import imageio
@@ -18,6 +20,16 @@ from examples.simBenchmarks.LIBERO.eval_files.model2libero_interface import Mode
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+
+
+_VIDEO_WRITE_QUEUE = queue.Queue()
+
+
+def _write_videos_forever():
+    while True:
+        path, frames = _VIDEO_WRITE_QUEUE.get()
+        imageio.mimwrite(path, frames, fps=10)
+        _VIDEO_WRITE_QUEUE.task_done()
 
 
 def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
@@ -39,6 +51,8 @@ class Args:
         "libero_goal"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
+    start_task_idx: int = 0  # Inclusive task index to start from (for multi-process slicing)
+    end_task_idx: int = -1  # Exclusive task index to stop at; -1 = suite end
     num_trials_per_task: int = 50  # Number of rollouts per task
     max_tasks: int = -1  # If > 0, limit the number of tasks evaluated (smoke / quick check). -1 = run all.
 
@@ -58,6 +72,8 @@ class Args:
 
     job_name: str = "test"
 
+    log_path: str = "experiments/libero/logs"
+
 
 def eval_libero(args: Args) -> None:
     logging.info(f"Arguments: {json.dumps(dataclasses.asdict(args), indent=4)}")
@@ -74,6 +90,8 @@ def eval_libero(args: Args) -> None:
     # args.video_out_path = f"{date_base}+{args.job_name}"
 
     pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+
+    threading.Thread(target=_write_videos_forever, daemon=True).start()
 
     if args.task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
@@ -96,11 +114,14 @@ def eval_libero(args: Args) -> None:
 
     # Optional smoke-test cap (still useful for quick verification with -1 = full run).
     n_eval_tasks = num_tasks_in_suite if args.max_tasks <= 0 else min(args.max_tasks, num_tasks_in_suite)
-    logging.info(f"Evaluating {n_eval_tasks} of {num_tasks_in_suite} tasks (max_tasks={args.max_tasks})")
+    eval_end = n_eval_tasks if args.end_task_idx < 0 else min(args.end_task_idx, n_eval_tasks)
+    eval_start = min(args.start_task_idx, eval_end)
+    logging.info(f"Evaluating tasks [{eval_start}, {eval_end}) of {num_tasks_in_suite} (max_tasks={args.max_tasks})")
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(n_eval_tasks)):
+    task_results = {}
+    for task_id in tqdm.tqdm(range(eval_start, eval_end)):
         # Get task
         task = task_suite.get_task(task_id)
 
@@ -188,7 +209,7 @@ def eval_libero(args: Args) -> None:
                     logging.warning(
                         f"Unexpected action sizes: "
                         f"wv={world_vector_delta.shape}, rot={rotation_delta.shape}, grip={gripper.shape}. "
-                        f"Falling back to LIBERO_DUMMY_ACTION."
+                        f"evaluation terminates."
                     )
                     raise ValueError(
                         f"Invalid action sizes: world_vector={world_vector_delta.shape}, "
@@ -215,10 +236,11 @@ def eval_libero(args: Args) -> None:
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
+            _VIDEO_WRITE_QUEUE.put(
+                (
+                    pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
+                    [np.asarray(x) for x in replay_images],
+                )
             )
 
             full_actions = np.stack(full_actions)
@@ -231,8 +253,15 @@ def eval_libero(args: Args) -> None:
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
         # Log final results
+        task_results[task_id] = {"total_count": task_episodes, "success_count": task_successes}
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+
+    pathlib.Path(args.log_path).mkdir(parents=True, exist_ok=True)
+    with open(pathlib.Path(args.log_path) / f"{args.start_task_idx}_{eval_end}.json", "w", encoding="utf-8") as f:
+        json.dump(task_results, f)
+
+    _VIDEO_WRITE_QUEUE.join()
 
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
