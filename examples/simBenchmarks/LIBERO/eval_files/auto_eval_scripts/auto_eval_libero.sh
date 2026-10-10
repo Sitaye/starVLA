@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
+STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
 cd "${STARVLA_DIR}"
 SCRIPT_PATH="./examples/simBenchmarks/LIBERO/eval_files/auto_eval_scripts/eval_libero_parall.sh"
 

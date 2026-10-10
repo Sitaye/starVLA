@@ -13,7 +13,7 @@ authors = [
 description = "StarVLA: A Lego-like Codebase for Vision-Language-Action Model Developing ."
 version = "1.0.1"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 keywords = ["vision-language-actions models", " robotic manipulation", "multimodal pretraining", "robot learning", "generative models"]
 license = {file = "LICENSE"}
 classifiers = [
