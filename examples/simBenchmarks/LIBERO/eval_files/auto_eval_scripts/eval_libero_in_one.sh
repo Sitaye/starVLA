@@ -35,12 +35,12 @@ CUDA_VISIBLE_DEVICES=$gpu_id ${STARVLA_PYTHON} deployment/model_server/server_po
 # Get the server PID
 server_pid=$!
 
-# Extract model_root from your_ckpt
-model_root=$(echo "$your_ckpt" | awk -F'/checkpoints/' '{print $1}')
+# Put logs/videos/aggregate under the checkpoint's own directory
+ckpt_dir=$(dirname "$your_ckpt")
 folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
 
-video_out_path="${model_root}/videos/${task_suite_name}/${folder_name}"
-log_path="${model_root}/logs/${task_suite_name}"
+video_out_path="${ckpt_dir}/videos/${task_suite_name}/${folder_name}"
+log_path="${ckpt_dir}/logs/${task_suite_name}"
 mkdir -p "$video_out_path"
 mkdir -p "$log_path"
 
@@ -92,9 +92,9 @@ done
 wait "${pids[@]}"
 
 "${STARVLA_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/parallel_eval/aggregate_results.py \
-    --root_path "${model_root}"
+    --root_path "${ckpt_dir}"
 
-echo "Evaluation completed. Videos in ${video_out_path}, logs in ${log_path}, aggregate at ${model_root}/overall_results.json"
+echo "Evaluation completed. Videos in ${video_out_path}, logs in ${log_path}, aggregate at ${ckpt_dir}/overall_results.json"
 
 if [ -n "$server_pid" ]; then
     echo "Killing server process with PID: $server_pid"
