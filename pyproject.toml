@@ -52,7 +52,6 @@ dependencies = [
     "qwen-vl-utils==0.0.14",
     "omegaconf==2.3.1",
     "numpy==2.5.3",
-    "wandb==0.30.0",
     "rich==14.3.4",
     "diffusers==0.41.0",
     "timm==1.0.30",
@@ -66,7 +65,8 @@ dependencies = [
     "flash-attn==2.7.2.post1",
     "flash-linear-attention==0.5.2",
     "causal-conv1d==1.7.0",
-    "swanlab==0.10.1"
+    "wandb",
+    "swanlab"
 ]
 
 [project.optional-dependencies]
