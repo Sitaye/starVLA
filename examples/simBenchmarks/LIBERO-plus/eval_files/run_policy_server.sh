@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../.." && pwd)}"
+STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
 ABot_python="${ABot_python:-python}"
 your_ckpt="${your_ckpt:-/path/to/checkpoint.pt}"
 base_port="${base_port:-9883}"

@@ -4,6 +4,8 @@ import logging
 import math
 import os
 import pathlib
+import queue
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -64,6 +66,15 @@ class AdaptiveEnsembler:
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+
+_VIDEO_WRITE_QUEUE = queue.Queue()
+
+
+def _write_videos_forever():
+    while True:
+        path, frames = _VIDEO_WRITE_QUEUE.get()
+        imageio.mimwrite(path, frames, fps=25)
+        _VIDEO_WRITE_QUEUE.task_done()
 
 
 def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
@@ -126,6 +137,7 @@ class Args:
 
     start_idx: int = -1
     end_idx: int = -1
+    save_video: bool = True  # Set False to skip mp4 encoding/storage (success-rate reporting unaffected)
     output_dir: str = "./output"
 
 
@@ -213,8 +225,6 @@ class PolicyModel:
             if task_description != self.task_description:
                 self.reset(task_description)
 
-        images = [self._resize_image(image) for image in images]
-        example["image"] = images
         vla_input = {
             # "examples": [example],
             "do_sample": False,
@@ -224,6 +234,8 @@ class PolicyModel:
 
         action_chunk_size = self.action_chunk_size
         if step % action_chunk_size == 0:
+            images = [self._resize_image(image) for image in images]
+            example["image"] = images
             response = self.vla.predict_action(example, **vla_input)
             normalized_actions = response["normalized_actions"]  # B, chunk, D
 
@@ -373,6 +385,7 @@ def eval_libero(args: Args) -> None:
     logger.info(f"Arguments: {json.dumps(dataclasses.asdict(args), indent=4)}")
     video_out_path = os.path.join(args.output_dir, args.task_suite_name)
     pathlib.Path(video_out_path).mkdir(parents=True, exist_ok=True)
+    threading.Thread(target=_write_videos_forever, daemon=True).start()
 
     if args.task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
@@ -537,26 +550,27 @@ def eval_libero(args: Args) -> None:
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
 
-            imageio.mimwrite(
-                pathlib.Path(video_out_path) / f"rollout_{ID2CATEGORY[task_id+1][1]}_episode{episode_idx}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=25,
-            )
+            if args.save_video:
+                _VIDEO_WRITE_QUEUE.put(
+                    (
+                        pathlib.Path(video_out_path)
+                        / f"rollout_{ID2CATEGORY[task_id+1][1]}_episode{episode_idx}_{suffix}.mp4",
+                        [np.asarray(x) for x in replay_images],
+                    )
+                )
 
-            full_actions = np.stack(full_actions)
-            # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
-
-            # print(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4")
             # Log current results
             logger.info(f"Success: {done}")
             logger.info(f"# episodes completed so far: {total_episodes}")
             logger.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
         # Log final results
+        with open(os.path.join(log_path, f"{args.start_idx}_to_{args.end_idx}.json"), "w", encoding="utf-8") as f:
+            json.dump(disturb_res, f)
         logger.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logger.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
-    with open(os.path.join(log_path, f"{args.start_idx}_to_{args.end_idx}.json"), "w", encoding="utf-8") as f:
-        json.dump(disturb_res, f)
+    _VIDEO_WRITE_QUEUE.join()
+
     logger.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logger.info(f"Total episodes: {total_episodes}")
 

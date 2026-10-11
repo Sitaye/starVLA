@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
+STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
 LIBERO_HOME="${LIBERO_HOME:-}"
 LIBERO_PYTHON="${LIBERO_PYTHON:-python}"
-MUJOCO_GL="${MUJOCO_GL:-osmesa}"
+export MUJOCO_GL="${MUJOCO_GL:-egl}"
 tasks_per_gpu="${tasks_per_gpu:-3}"
 your_ckpt="${your_ckpt:-/path/to/checkpoint.pt}"
 output_dir="${output_dir:-${STARVLA_DIR}/results/libero_plus_parallel_eval}"
@@ -42,6 +42,10 @@ for ((i=0; i<tasks_per_gpu; i++)); do
         current_end=$end_idx
     fi
 
+    if [ $current_start -ge $current_end ]; then
+        break
+    fi
+
     echo "Part $((i)): start=$current_start, end=$current_end ([$current_start, $current_end))"
     # torchrun --nproc_per_node=$gpu_per_pod --nnodes=$WORLD_SIZE --node_rank=$RANK --master_addr=$((MASTER_ADDR+i)) --master_port=$MASTER_PORT 
     "${LIBERO_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/parallel_eval/eval_libero_model.py \
@@ -60,7 +64,11 @@ for ((i=0; i<tasks_per_gpu; i++)); do
 done
 
 
-wait
+fail=0
+for part_pid in $(jobs -p); do
+    wait "$part_pid" || fail=1
+done
+exit $fail
 
 # # =============== Aggregate results ===============
 # echo "All tasks completed. Aggregating results..."

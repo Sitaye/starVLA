@@ -4,6 +4,8 @@ import logging
 import math
 import os
 import pathlib
+import queue
+import threading
 import time
 
 import imageio
@@ -18,6 +20,15 @@ from examples.simBenchmarks.LIBERO.eval_files.model2libero_interface import Mode
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+
+_VIDEO_WRITE_QUEUE = queue.Queue()
+
+
+def _write_videos_forever():
+    while True:
+        path, frames = _VIDEO_WRITE_QUEUE.get()
+        imageio.mimwrite(path, frames, fps=25)
+        _VIDEO_WRITE_QUEUE.task_done()
 
 
 def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
@@ -41,6 +52,9 @@ class Args:
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
+    start_task_idx: int = 0  # Inclusive task index to start from (for multi-process slicing)
+    end_task_idx: int = -1  # Exclusive task index to stop at; -1 = suite end
+    save_video: bool = True  # Set False to skip mp4 encoding/storage (success-rate reporting unaffected)
 
     #################################################################################################################
     # Utils
@@ -72,6 +86,7 @@ def eval_libero(args: Args) -> None:
     # args.video_out_path = f"{date_base}+{args.job_name}"
 
     pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+    threading.Thread(target=_write_videos_forever, daemon=True).start()
 
     if args.task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
@@ -104,12 +119,15 @@ def eval_libero(args: Args) -> None:
         ID2CATEGORY[item["id"]] = (category, item_name)
         if category not in disturb_res:
             disturb_res[category] = {"total_count": 0, "success_count": 0}
-        disturb_res[category]["total_count"] += 1
 
     # Start evaluation
 
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
+    eval_end = num_tasks_in_suite if args.end_task_idx < 0 else min(args.end_task_idx, num_tasks_in_suite)
+    eval_start = min(args.start_task_idx, eval_end)
+    logging.info(f"Evaluating tasks [{eval_start}, {eval_end}) of {num_tasks_in_suite}")
+    pathlib.Path(args.log_path).mkdir(parents=True, exist_ok=True)
+    for task_id in tqdm.tqdm(range(eval_start, eval_end)):
 
         # Get task
         task = task_suite.get_task(task_id)
@@ -225,32 +243,33 @@ def eval_libero(args: Args) -> None:
 
             task_episodes += 1
             total_episodes += 1
+            disturb_res[ID2CATEGORY[task_id + 1][0]]["total_count"] += 1
 
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
 
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path)
-                / f"rollout_{ID2CATEGORY[task_id+1][1]}_episode{episode_idx}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=25,
-            )
+            if args.save_video:
+                _VIDEO_WRITE_QUEUE.put(
+                    (
+                        pathlib.Path(args.video_out_path)
+                        / f"rollout_{ID2CATEGORY[task_id+1][1]}_episode{episode_idx}_{suffix}.mp4",
+                        [np.asarray(x) for x in replay_images],
+                    )
+                )
 
-            full_actions = np.stack(full_actions)
-            # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
-
-            # print(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4")
             # Log current results
             logging.info(f"Success: {done}")
             logging.info(f"# episodes completed so far: {total_episodes}")
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
         # Log final results
+        with open(os.path.join(args.log_path, f"{args.start_task_idx}_to_{eval_end}.json"), "w", encoding="utf-8") as f:
+            json.dump(disturb_res, f)
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
-    with open(os.path.join(args.log_path, f"{args.task_suite_name}.json"), "w", encoding="utf-8") as f:
-        json.dump(disturb_res, f)
+    _VIDEO_WRITE_QUEUE.join()
+
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
 
