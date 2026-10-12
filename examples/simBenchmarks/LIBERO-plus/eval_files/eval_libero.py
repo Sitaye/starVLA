@@ -18,8 +18,8 @@ from libero.libero.envs import OffScreenRenderEnv
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from examples.simBenchmarks.LIBERO.eval_files.model2libero_interface import ModelClient
 
-LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
-LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
+LIBERO_PLUS_DUMMY_ACTION = [0.0] * 6 + [-1.0]
+LIBERO_PLUS_ENV_RESOLUTION = 256  # resolution used to render training data
 
 _VIDEO_WRITE_QUEUE = queue.Queue()
 
@@ -45,7 +45,7 @@ class Args:
     resize_size = [224, 224]
 
     #################################################################################################################
-    # LIBERO environment-specific parameters
+    # LIBERO-Plus environment-specific parameters
     #################################################################################################################
     task_suite_name: str = (
         "libero_goal"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
@@ -59,8 +59,8 @@ class Args:
     #################################################################################################################
     # Utils
     #################################################################################################################
-    video_out_path: str = "experiments/libero/logs"  # Path to save videos
-    log_path: str = "experiments/libero/logs"
+    video_out_path: str = "experiments/libero_plus/logs"  # Path to save videos
+    log_path: str = "experiments/libero_plus/logs"
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -74,13 +74,13 @@ class Args:
     job_name: str = "test"
 
 
-def eval_libero(args: Args) -> None:
+def eval_libero_plus(args: Args) -> None:
     logging.info(f"Arguments: {json.dumps(dataclasses.asdict(args), indent=4)}")
 
     # Set random seed
     np.random.seed(args.seed)
 
-    # Initialize LIBERO task suite
+    # Initialize LIBERO-Plus task suite
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[args.task_suite_name]()
     num_tasks_in_suite = task_suite.n_tasks
@@ -134,11 +134,11 @@ def eval_libero(args: Args) -> None:
         # Get task
         task = task_suite.get_task(task_id)
 
-        # Get default LIBERO initial states
+        # Get default LIBERO-Plus initial states
         initial_states = task_suite.get_task_init_states(task_id)
 
-        # Initialize LIBERO environment and task description
-        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+        # Initialize LIBERO-Plus environment and task description
+        env, task_description = _get_libero_plus_env(task, LIBERO_PLUS_ENV_RESOLUTION, args.seed)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
@@ -169,7 +169,7 @@ def eval_libero(args: Args) -> None:
                 # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
                 # and we need to wait for them to fall
                 if t < args.num_steps_wait:
-                    obs, reward, done, info = env.step(LIBERO_DUMMY_ACTION)
+                    obs, reward, done, info = env.step(LIBERO_PLUS_DUMMY_ACTION)
                     t += 1
                     continue
 
@@ -276,8 +276,8 @@ def eval_libero(args: Args) -> None:
     logging.info(f"Total episodes: {total_episodes}")
 
 
-def _get_libero_env(task, resolution, seed):
-    """Initializes and returns the LIBERO environment, along with the task description."""
+def _get_libero_plus_env(task, resolution, seed):
+    """Initializes and returns the LIBERO-Plus environment, along with the task description."""
     task_description = task.language
     task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
     env_args = {
@@ -328,4 +328,4 @@ if __name__ == "__main__":
     )
     if os.getenv("DEBUG", False):
         start_debugpy_once()
-    tyro.cli(eval_libero)
+    tyro.cli(eval_libero_plus)
