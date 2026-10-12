@@ -1,6 +1,6 @@
 #!/bin/bash
 
-ENVS="WANDB_MODE=offline,WANDB_MODE=disabled,HF_ENDPOINT=https://hf-mirror.com"
+ENVS="WANDB_MODE=disabled,HF_ENDPOINT=https://hf-mirror.com"
 
 sizes=(2519 2591 2518 2402)
 tasks=("libero_10" "libero_goal" "libero_object" "libero_spatial")

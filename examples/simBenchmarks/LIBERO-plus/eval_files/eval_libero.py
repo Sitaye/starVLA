@@ -111,7 +111,7 @@ def eval_libero_plus(args: Args) -> None:
     )
 
     disturb_res = {}
-    LIBERO_PLUS_HOME = os.environ.get("LIBERO_PLUS_HOME", "path_to_LIBERO-plus_home")
+    LIBERO_PLUS_HOME = os.environ.get("LIBERO_PLUS_HOME", "path_to_LIBERO_PLUS_HOME")
     with open(os.path.join(LIBERO_PLUS_HOME, "libero/libero/benchmark/task_classification.json")) as f:
         TASK_MAPPING = json.load(f)[args.task_suite_name]
     ID2CATEGORY = {}

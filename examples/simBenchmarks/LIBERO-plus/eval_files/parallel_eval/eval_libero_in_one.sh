@@ -5,6 +5,7 @@ STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
 LIBERO_PLUS_HOME="${LIBERO_PLUS_HOME:-}"
 LIBERO_PLUS_PYTHON="${LIBERO_PLUS_PYTHON:-python}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
+export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
 tasks_per_gpu="${tasks_per_gpu:-3}"
 your_ckpt="${your_ckpt:-/path/to/checkpoint.pt}"
 output_dir="${output_dir:-${STARVLA_DIR}/results/libero_plus_parallel_eval}"
@@ -25,7 +26,6 @@ task_suite_name=$1
 start_idx=$2
 end_idx=$3
 num_trials_per_task=1
-# torchrun --nproc_per_node=1 ./examples/simBenchmarks/LIBERO-plus/eval_files/eval_nebula/eval_libero_model.py \
 
 total=$((end_idx - start_idx))
 chunk_size=$((total / tasks_per_gpu))
@@ -50,7 +50,6 @@ for ((i=0; i<tasks_per_gpu; i++)); do
     fi
 
     echo "Part $((i)): start=$current_start, end=$current_end ([$current_start, $current_end))"
-    # torchrun --nproc_per_node=$gpu_per_pod --nnodes=$WORLD_SIZE --node_rank=$RANK --master_addr=$((MASTER_ADDR+i)) --master_port=$MASTER_PORT 
     "${LIBERO_PLUS_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/parallel_eval/eval_libero_model.py \
     --pretrained_path $your_ckpt \
     --task_suite_name $task_suite_name \
@@ -72,8 +71,3 @@ for part_pid in $(jobs -p); do
     wait "$part_pid" || fail=1
 done
 exit $fail
-
-# # =============== Aggregate results ===============
-# echo "All tasks completed. Aggregating results..."
-# export LOG_DIR="${LOG_DIR}"
-# python ./examples/simBenchmarks/LIBERO-plus/eval_files/aggregate_results.py
