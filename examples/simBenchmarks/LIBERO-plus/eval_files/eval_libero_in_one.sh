@@ -2,20 +2,23 @@
 set -euo pipefail
 
 STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
-LIBERO_HOME="${LIBERO_HOME:-}"
-LIBERO_PYTHON="${LIBERO_PYTHON:-python}"
+LIBERO_PLUS_HOME="${LIBERO_PLUS_HOME:-}"
+LIBERO_PLUS_PYTHON="${LIBERO_PLUS_PYTHON:-python}"
 STARVLA_PYTHON="${STARVLA_PYTHON:-python}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
 
-if [[ -z "${LIBERO_HOME}" ]]; then
-  echo "LIBERO_HOME is required."
+if [[ -z "${LIBERO_PLUS_HOME}" ]]; then
+  echo "LIBERO_PLUS_HOME is required."
   exit 1
 fi
 
 cd "${STARVLA_DIR}"
-export LIBERO_CONFIG_PATH="${LIBERO_HOME}/libero"
-export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_HOME}:${STARVLA_DIR}"
+# user-facing vars above; package-facing aliases for the libero codebase below
+export LIBERO_PLUS_HOME
+export LIBERO_HOME="${LIBERO_PLUS_HOME}"
+export LIBERO_CONFIG_PATH="${LIBERO_PLUS_HOME}/libero"
+export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_PLUS_HOME}:${STARVLA_DIR}"
 
 ##### === variables for which evaluation to setup ===
 your_ckpt=$1        # e.g. .../baseline/checkpoints/steps_30000_pytorch_model.pt
@@ -30,7 +33,7 @@ tasks_per_gpu="${TASKS_PER_GPU:-3}"
 host="127.0.0.1"
 
 if [[ "${num_tasks}" -lt 0 ]]; then
-  num_tasks=$("${LIBERO_PYTHON}" -c "from libero.libero import benchmark; print(benchmark.get_benchmark_dict()['${task_suite_name}']().n_tasks)" | tail -n 1)
+  num_tasks=$("${LIBERO_PLUS_PYTHON}" -c "from libero.libero import benchmark; print(benchmark.get_benchmark_dict()['${task_suite_name}']().n_tasks)" | tail -n 1)
 fi
 
 CUDA_VISIBLE_DEVICES=$gpu_id ${STARVLA_PYTHON} deployment/model_server/server_policy.py \
@@ -76,7 +79,7 @@ for ((i=0; i<tasks_per_gpu; i++)); do
     fi
     echo "Part ${i}: tasks [${eval_start}, ${eval_end}) -> ${p_log}"
 
-    "${LIBERO_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/eval_libero.py \
+    "${LIBERO_PLUS_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/eval_libero.py \
         --args.pretrained-path "${your_ckpt}" \
         --args.host "$host" \
         --args.port "$base_port" \

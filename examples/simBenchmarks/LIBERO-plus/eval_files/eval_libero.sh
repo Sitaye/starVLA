@@ -2,8 +2,8 @@
 set -euo pipefail
 
 STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
-LIBERO_HOME="${LIBERO_HOME:-}"
-LIBERO_Python="${LIBERO_Python:-python}"
+LIBERO_PLUS_HOME="${LIBERO_PLUS_HOME:-}"
+LIBERO_PLUS_PYTHON="${LIBERO_PLUS_PYTHON:-python}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
 host="${host:-127.0.0.1}"
@@ -11,14 +11,17 @@ your_ckpt="${your_ckpt:-/path/to/checkpoint.pt}"
 output_dir="${output_dir:-${STARVLA_DIR}/results/libero_plus_eval}"
 gpu_id="${gpu_id:-0}"
 
-if [[ -z "${LIBERO_HOME}" ]]; then
-  echo "LIBERO_HOME is required."
+if [[ -z "${LIBERO_PLUS_HOME}" ]]; then
+  echo "LIBERO_PLUS_HOME is required."
   exit 1
 fi
 
 cd "${STARVLA_DIR}"
-export LIBERO_CONFIG_PATH="${LIBERO_HOME}/libero"
-export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_HOME}:${STARVLA_DIR}"
+# user-facing vars above; package-facing aliases for the libero codebase below
+export LIBERO_PLUS_HOME
+export LIBERO_HOME="${LIBERO_PLUS_HOME}"
+export LIBERO_CONFIG_PATH="${LIBERO_PLUS_HOME}/libero"
+export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_PLUS_HOME}:${STARVLA_DIR}"
 
 ckpt_dir=$(dirname "$your_ckpt")
 eval_name=$(basename "$your_ckpt")
@@ -36,7 +39,7 @@ for task_suite_name in libero_goal libero_spatial libero_object libero_10; do
     log_file="${log_path}/${task_suite_name}.log"
     mkdir -p "${video_out_path}" "${log_path}"
 
-    CUDA_VISIBLE_DEVICES="${gpu_id}" "${LIBERO_Python}" ./examples/simBenchmarks/LIBERO-plus/eval_files/eval_libero.py \
+    CUDA_VISIBLE_DEVICES="${gpu_id}" "${LIBERO_PLUS_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/eval_libero.py \
         --args.pretrained-path "${your_ckpt}" \
         --args.host "$host" \
         --args.port ${base_port} \
@@ -55,6 +58,6 @@ for suite_pid in "${pids[@]}"; do
 done
 
 echo "All tasks completed. Aggregating results..."
-"${LIBERO_Python}" ./examples/simBenchmarks/LIBERO-plus/eval_files/parallel_eval/aggregate_results.py --root_path "${eval_root}" || fail=1
+"${LIBERO_PLUS_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/parallel_eval/aggregate_results.py --root_path "${eval_root}" || fail=1
 echo "Results at ${eval_root}/overall_results.json"
 exit $fail
