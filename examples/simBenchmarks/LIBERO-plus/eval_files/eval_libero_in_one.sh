@@ -30,7 +30,7 @@ tasks_per_gpu="${TASKS_PER_GPU:-3}"
 host="127.0.0.1"
 
 if [[ "${num_tasks}" -lt 0 ]]; then
-  num_tasks=$("${LIBERO_PYTHON}" -c "from libero.libero import benchmark; print(benchmark.get_benchmark_dict()['${task_suite_name}']().n_tasks)")
+  num_tasks=$("${LIBERO_PYTHON}" -c "from libero.libero import benchmark; print(benchmark.get_benchmark_dict()['${task_suite_name}']().n_tasks)" | tail -n 1)
 fi
 
 CUDA_VISIBLE_DEVICES=$gpu_id ${STARVLA_PYTHON} deployment/model_server/server_policy.py \

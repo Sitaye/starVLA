@@ -66,6 +66,9 @@ class Args:
 
     pretrained_path: str = ""
 
+    # Dataset key for un-normalization. None = auto (only if model trained on a single dataset).
+    unnorm_key: str | None = None
+
     post_process_action: bool = True
 
     job_name: str = "test"
@@ -102,10 +105,9 @@ def eval_libero(args: Args) -> None:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
     client_model = ModelClient(
-        policy_ckpt_path=args.pretrained_path,  # to get unnormalization stats
         host=args.host,
         port=args.port,
-        image_size=args.resize_size,
+        unnorm_key=args.unnorm_key,
     )
 
     disturb_res = {}
@@ -219,7 +221,7 @@ def eval_libero(args: Args) -> None:
                     logging.warning(
                         f"Unexpected action sizes: "
                         f"wv={world_vector_delta.shape}, rot={rotation_delta.shape}, grip={gripper.shape}. "
-                        f"Falling back to LIBERO_DUMMY_ACTION."
+                        f"evaluation terminates."
                     )
                     raise ValueError(
                         f"Invalid action sizes: world_vector={world_vector_delta.shape}, "
