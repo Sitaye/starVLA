@@ -507,8 +507,10 @@ class Qwenvl_OFT(baseframework):
         embeddings at the raw natural-language instruction tokens (example["lang"]),
         excluding the chat template, the discretised state block and the
         action-prediction suffix. The span is matched at token-id level as a
-        contiguous run equal to the isolated tokenization of the instruction and
-        verified by decoding that run back to the exact instruction text, so no
+        contiguous run equal to the isolated tokenization of the instruction (or
+        its leading-space variant, since the prompt embeds the instruction
+        mid-sentence and BPE merges the preceding space into its first token) and
+        verified by decoding that run back to the instruction text, so no
         per-token decode reconstruction is needed. The text path is detached;
         LN(z_lang) + FiLM-adaptation run inside MotionHead.
 
@@ -522,14 +524,23 @@ class Qwenvl_OFT(baseframework):
         mask = torch.zeros_like(ids_cpu, dtype=torch.bool)
         for b, example in enumerate(examples):
             lang = example["lang"]
-            lang_ids = torch.tensor(tokenizer(lang, add_special_tokens=False)["input_ids"])
-            windows = ids_cpu[b].unfold(0, lang_ids.numel(), 1)  # [L - T + 1, T]
-            candidates = (windows == lang_ids).all(-1).nonzero(as_tuple=False).flatten().tolist()
-            for start in candidates:
-                if tokenizer.decode(ids_cpu[b, start : start + lang_ids.numel()].tolist()) == lang:
-                    mask[b, start : start + lang_ids.numel()] = True
+            # "{lang}" sits mid-sentence in the rendered prompt, so its in-context first
+            # token carries the preceding space; match the isolated or spaced variant.
+            lang_key = lang.strip()
+            found = False
+            for variant in (lang, " " + lang):
+                lang_ids = torch.tensor(tokenizer(variant, add_special_tokens=False)["input_ids"])
+                windows = ids_cpu[b].unfold(0, lang_ids.numel(), 1)  # [L - T + 1, T]
+                candidates = (windows == lang_ids).all(-1).nonzero(as_tuple=False).flatten().tolist()
+                for start in candidates:
+                    end = start + lang_ids.numel()
+                    if tokenizer.decode(ids_cpu[b, start:end].tolist()).strip() == lang_key:
+                        mask[b, start:end] = True
+                        found = True
+                        break
+                if found:
                     break
-            else:
+            if not found:
                 raise ValueError(f"cannot locate the instruction token span in sample {b} for {lang[:60]!r}")
         mask = mask.to(entry_embeds.device)
         if not mask.any(-1).all():
