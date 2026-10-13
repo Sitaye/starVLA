@@ -22,7 +22,7 @@ from typing import Tuple
 import numpy as np
 import torch
 import torch.distributed as dist
-
+torch.backends.cudnn.benchmark = True
 # NPU support: import torch_npu and enable automatic CUDA→NPU mapping.
 # On GPU-only environments this is a no-op (ImportError is silently ignored).
 try:
