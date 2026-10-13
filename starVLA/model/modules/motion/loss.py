@@ -49,10 +49,13 @@ def motion_credit(
            per-(sample, view) budget renormalisation of a_i = m q w.
 
     w_mode="shuffled" permutes the w values within each (sample, view) among
-    valid tokens falling in the same fixed q stratum (the q grid [0.25, 1]
-    split into 4 equal bins), keeping the weight distribution and the
-    confidence strata intact while breaking the token correspondence; it
-    still consumes the real gradients, and compat is reported pre-permutation.
+    rankable tokens falling in the same fixed q stratum (the q grid [0.25, 1]
+    split into 4 equal bins), keeping the rankable weight distribution and
+    the confidence strata intact while breaking the token correspondence;
+    non-rankable valid tokens keep the neutral w = 1 and invalid anchors
+    stay excluded, so the control differs from compat only in where credit
+    lands; it still consumes the real gradients, and compat is reported
+    pre-permutation.
 
     :param g_A_tok: torch.Tensor [B, V, H_tok, W_tok, D], action-loss gradient at visual tokens.
     :param g_M_tok: torch.Tensor [B, V, H_tok, W_tok, D], motion-loss gradient at visual tokens.
@@ -93,7 +96,7 @@ def motion_credit(
     changed_fraction = w.new_zeros(())
     weight_l1 = w.new_zeros(())
     if w_mode == "shuffled":
-        w_shuf = _shuffle_within_q_strata(w, q_map, valid)
+        w_shuf = _shuffle_within_q_strata(w, q_map, valid, rankable)
         delta = (w_shuf - w)[valid]
         changed_fraction = (delta != 0).sum().float() / valid.sum().float().clamp(min=1)
         weight_l1 = delta.abs().sum().float() / valid.sum().float().clamp(min=1)
@@ -109,16 +112,23 @@ def motion_credit(
 
 
 def _shuffle_within_q_strata(
-    w: torch.Tensor, q_map: torch.Tensor, valid: torch.Tensor, num_strata: int = 4
+    w: torch.Tensor,
+    q_map: torch.Tensor,
+    valid: torch.Tensor,
+    rankable: torch.Tensor,
+    num_strata: int = 4,
 ) -> torch.Tensor:
     """
     Break the w <-> token correspondence while preserving its distribution: within
     each (sample, view) and each fixed stratum of the q grid [0.25, 1], permute the
-    valid tokens' w values bijectively. Tokens outside the valid anchors keep w = 0.
+    rankable tokens' w values bijectively. Non-rankable valid tokens keep the
+    neutral w = 1; tokens outside the valid anchors keep w = 0.
 
     :param w: torch.Tensor, [B, V, H_tok, W_tok], detached credit weights.
     :param q_map: torch.Tensor, [B, V, H_tok, W_tok], raw q_i confidence in [0.25, 1].
     :param valid: torch.Tensor, [B, V, H_tok, W_tok] bool, anchors with RAFT supervision.
+    :param rankable: torch.Tensor, [B, V, H_tok, W_tok] bool, valid anchors with
+        interpretable gradient directions; the permutation pool (subset of valid).
     :param num_strata: int, fixed equal-width bins on the q grid.
     :return: torch.Tensor, [B, V, H_tok, W_tok] permuted credit weights.
     """
@@ -129,7 +139,7 @@ def _shuffle_within_q_strata(
             view_q = q_map[b, v]
             for k in range(num_strata):
                 upper = edges[k + 1] if k < num_strata - 1 else edges[k + 1] + 1.0
-                sel = valid[b, v] & (view_q >= edges[k]) & (view_q < upper)
+                sel = rankable[b, v] & (view_q >= edges[k]) & (view_q < upper)
                 idx = sel.nonzero(as_tuple=True)
                 if idx[0].numel() < 2:
                     continue
