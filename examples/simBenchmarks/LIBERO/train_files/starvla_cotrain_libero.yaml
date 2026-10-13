@@ -20,7 +20,6 @@ framework:
   motion:
     mode: compat
     loss_weight: 2.0
-    credit_temperature: 0.5
 
 datasets:
   vlm_data:

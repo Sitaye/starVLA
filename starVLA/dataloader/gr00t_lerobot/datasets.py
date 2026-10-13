@@ -2464,7 +2464,9 @@ class LeRobotMixtureDataset(Dataset):
                 data = dataset.transforms(raw_data)
                 sample = dataset._pack_sample(data)
                 if self.flow_cache is not None:
-                    sample["flow_target"] = self.flow_cache.get(dataset.dataset_name, trajectory_id, step)
+                    flow_target, flow_target_q = self.flow_cache.get(dataset.dataset_name, trajectory_id, step)
+                    sample["flow_target"] = flow_target
+                    sample["flow_target_q"] = flow_target_q
                 return sample
                 
             except Exception as e:

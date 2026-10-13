@@ -23,83 +23,82 @@ def token_motion_loss(pred_flow: torch.Tensor, target_flow: torch.Tensor) -> tup
 
 
 def motion_credit(
-    per_token_motion_loss: torch.Tensor,
-    g_A_tok: torch.Tensor | None,
-    g_M_tok: torch.Tensor | None,
+    g_A_tok: torch.Tensor,
+    g_M_tok: torch.Tensor,
     valid: torch.Tensor,
+    q_map: torch.Tensor,
     w_mode: str = "compat",
-    tau: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Compatibility-aware credit assignment for motion supervision.
+    Rank-based compatibility credit assignment for motion supervision
+    (docs/research/new_idea3.md section 4.3).
 
-    C_ij  = cos_fp32(g_A_ij, g_M_ij): per-token alignment between the action
-            gradient and motion gradient at the representation coordinate, or 0
-            when either gradient vanishes at that token.
-    w_ij  = exp(C_ij / tau) / mean_valid(exp(C / tau)): temperature-softmax
-            mapping normalized to mean 1 over the valid tokens of each sample, so
-            L_M^AC keeps the same scale as the uniform mean and only redistributes
-            credit across tokens (tau=1 approximates the linear 1 + C mapping).
-    L_M^AC = (1/N_valid) * sum_ij stopgrad(w_ij) * L_ij
+    C_ij = cos_fp32(g_A_ij, g_M_ij): per-token alignment between the action
+           gradient and the motion gradient at the representation coordinate,
+           or 0 when either gradient vanishes at that token.
+    r_ij = ranknorm(C) over all valid tokens of the microbatch (cross-sample,
+           cross-view), so r in [0, 1] and the mapping no longer collapses to
+           near-uniform when the cosine distribution is narrow.
+    w_ij = 0.5 + r_ij at valid tokens, bounded in [0.5, 1.5] and 0 elsewhere;
+           the overall scale is fixed downstream by the a_i = m q w product
+           renormalisation of the weighted motion loss.
 
-    Matched controls for the experiment matrix reuse the same pipeline:
-    w_mode="random" keeps the exp(C / tau) credit mapping but replaces the
-    learned C with a per-view scale-matched Gaussian (mean/std of the true
-    compat over each view's valid anchors, clipped to [-1, 1]), so each
-    view's spatial-variation magnitude matches its own Compat statistics
-    with a random claim assignment; it still consumes the real gradients for
-    the statistics, and compat is reported as None (per-token w statistics of
-    a random draw carry no diagnostic value).
-    w_mode="shuffled" permutes the learned C within the valid anchors of each
-    (sample, view) (bijective, so E[w]=1 survives; the per-view valid C
-    distribution is preserved, only the w_ij <-> spatial correspondence is
-    broken); it still needs the real gradients, and compat is reported as the
-    pre-permutation map.
+    w_mode="shuffled" permutes the w values within each (sample, view) among
+    valid tokens falling in the same fixed q stratum (the q grid [0.25, 1]
+    split into 4 equal bins), keeping the weight distribution and the
+    confidence strata intact while breaking the token correspondence; it
+    still consumes the real gradients, and compat is reported pre-permutation.
 
-    :param per_token_motion_loss: torch.Tensor, [B, V, H_tok, W_tok].
     :param g_A_tok: torch.Tensor [B, V, H_tok, W_tok, D], action-loss gradient at visual tokens.
     :param g_M_tok: torch.Tensor [B, V, H_tok, W_tok, D], motion-loss gradient at visual tokens.
     :param valid: torch.Tensor, [B, V, H_tok, W_tok] bool, anchors with RAFT supervision.
-    :param w_mode: str, one of {"compat", "random", "shuffled"}.
-    :param tau: float, temperature of the exp(C / tau) credit mapping; smaller tau
-        sharpens the spatial contrast of w.
-    :return: (w [B, V, H_tok, W_tok] detached, compat [B, V, H_tok, W_tok] detached or None for w_mode="random").
+    :param q_map: torch.Tensor, [B, V, H_tok, W_tok], raw q_i confidence in [0.25, 1]; strata only.
+    :param w_mode: str, one of {"compat", "shuffled"}.
+    :return: (w [B, V, H_tok, W_tok] detached, compat [B, V, H_tok, W_tok] detached).
     """
-    if w_mode == "random":
-        compat = None
-        g_A = g_A_tok.float()
-        g_M = g_M_tok.float()
-        c_raw = F.cosine_similarity(g_A, g_M, dim=-1)  # [B, V, H_tok, W_tok]
-        c_raw = torch.where((g_A.norm(dim=-1) > 0) & (g_M.norm(dim=-1) > 0), c_raw, torch.zeros_like(c_raw))
-        valid_f = valid.float()
-        count = valid_f.sum(dim=(2, 3), keepdim=True).clamp_min(1)
-        c_mu = (c_raw * valid_f).sum(dim=(2, 3), keepdim=True) / count
-        c_std = (((c_raw - c_mu) * valid_f) ** 2).sum(dim=(2, 3), keepdim=True) / count
-        c_std = c_std.sqrt()
-        C_source = (c_mu + c_std * torch.randn_like(c_raw)).clamp(-1.0, 1.0)
-    else:
-        g_A = g_A_tok.float()
-        g_M = g_M_tok.float()
-        compat = F.cosine_similarity(g_A, g_M, dim=-1)  # [B, V, H_tok, W_tok]
-        compat = torch.where((g_A.norm(dim=-1) > 0) & (g_M.norm(dim=-1) > 0), compat, torch.zeros_like(compat))
-        if w_mode == "shuffled":
-            flat = compat.reshape(compat.shape[0], compat.shape[1], -1)
-            vmask = valid.reshape(valid.shape[0], valid.shape[1], -1)
-            C_source = torch.zeros_like(flat)
-            for b in range(flat.shape[0]):
-                for v in range(flat.shape[1]):
-                    idx = vmask[b, v].nonzero(as_tuple=True)[0]
-                    vals = flat[b, v, idx]
-                    C_source[b, v, idx] = vals[torch.randperm(vals.numel(), device=vals.device)]
-            C_source = C_source.view_as(compat)
-        else:
-            C_source = compat
-    z = C_source / tau
-    z = z.masked_fill(~valid, float("-inf"))
-    z = z - z.amax(dim=(1, 2, 3), keepdim=True)
-    base = torch.exp(z)
-    base = torch.where(valid, base, torch.zeros_like(base))
-    w = base / (
-        base.sum(dim=(1, 2, 3), keepdim=True) / valid.sum(dim=(1, 2, 3), keepdim=True).clamp_min(1)
-    ).clamp_min(1e-12)
-    return w.detach(), None if compat is None else compat.detach()
+    g_A = g_A_tok.float()
+    g_M = g_M_tok.float()
+    compat = F.cosine_similarity(g_A, g_M, dim=-1)  # [B, V, H_tok, W_tok]
+    compat = torch.where((g_A.norm(dim=-1) > 0) & (g_M.norm(dim=-1) > 0), compat, torch.zeros_like(compat))
+    valid_flat = valid.reshape(-1)
+    c_valid = compat.reshape(-1)[valid_flat]
+    order = c_valid.argsort()
+    ranks = torch.empty(c_valid.numel(), device=c_valid.device, dtype=c_valid.dtype)
+    ranks[order] = torch.arange(c_valid.numel(), device=c_valid.device, dtype=c_valid.dtype)
+    w_valid = 0.5 + ranks / max(c_valid.numel() - 1, 1)
+    w_flat = torch.zeros(valid.numel(), device=c_valid.device, dtype=c_valid.dtype)
+    w_flat[valid_flat] = w_valid
+    w = w_flat.reshape(valid.shape)
+    if w_mode == "shuffled":
+        w = _shuffle_within_q_strata(w, q_map, valid)
+    return w.detach(), compat.detach()
+
+
+def _shuffle_within_q_strata(
+    w: torch.Tensor, q_map: torch.Tensor, valid: torch.Tensor, num_strata: int = 4
+) -> torch.Tensor:
+    """
+    Break the w <-> token correspondence while preserving its distribution: within
+    each (sample, view) and each fixed stratum of the q grid [0.25, 1], permute the
+    valid tokens' w values bijectively. Tokens outside the valid anchors keep w = 0.
+
+    :param w: torch.Tensor, [B, V, H_tok, W_tok], detached credit weights.
+    :param q_map: torch.Tensor, [B, V, H_tok, W_tok], raw q_i confidence in [0.25, 1].
+    :param valid: torch.Tensor, [B, V, H_tok, W_tok] bool, anchors with RAFT supervision.
+    :param num_strata: int, fixed equal-width bins on the q grid.
+    :return: torch.Tensor, [B, V, H_tok, W_tok] permuted credit weights.
+    """
+    out = w.clone()
+    edges = torch.linspace(0.25, 1.0, num_strata + 1, device=q_map.device)
+    for b in range(valid.shape[0]):
+        for v in range(valid.shape[1]):
+            view_q = q_map[b, v]
+            for k in range(num_strata):
+                upper = edges[k + 1] if k < num_strata - 1 else edges[k + 1] + 1.0
+                sel = valid[b, v] & (view_q >= edges[k]) & (view_q < upper)
+                idx = sel.nonzero(as_tuple=True)
+                if idx[0].numel() < 2:
+                    continue
+                vals = out[b, v][idx]
+                out[b, v][idx[0], idx[1]] = vals[torch.randperm(vals.numel(), device=vals.device)]
+    return out

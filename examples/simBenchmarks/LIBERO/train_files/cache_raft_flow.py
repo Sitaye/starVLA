@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
 from starVLA.dataloader.gr00t_lerobot.video import get_frames_by_timestamps
 from starVLA.dataloader.lerobot_datasets import make_LeRobotSingleDataset
-from starVLA.model.modules.motion.head import flow_to_token_grid
+from starVLA.model.modules.motion.head import flow_confidence_q, flow_to_token_grid
 from starVLA.model.modules.vlm.QWen3_5 import build_qwen_processor, qwen_apply_processor, qwen_build_messages
 
 
@@ -134,6 +134,11 @@ def main():
         "stride": image_size[1] // token_hw[1],
         "delta_step": args.delta_t,
         "unit": "token-cell displacement (area-pooled RAFT flow divided by token stride)",
+        "q_spec": (
+            "v1: F_b^w=grid_sample(F_{t+dt->t} at x+F_{t->t+dt}, align_corners=True, oob=0); "
+            "r=||F_f+F_b^w||_2 (token cells); T^2=||F_f||^2+||F_b^w||^2+1; "
+            "q=0.25+0.75*tokencell_mean(exp(-relu(r-T)/(T+1e-6)) * in_bounds)"
+        ),
         "teacher": "torchvision.raft_large weights=Raft_Large_Weights.DEFAULT",
         "torchvision_version": torchvision.__version__,
     }
@@ -157,10 +162,11 @@ def main():
             if 0 <= base_index + delta0 + args.delta_t < trajectory_length_by_id[trajectory_id]
         )
         flow_path, keys_path = out_dir / "flow.npy", out_dir / "keys.npy"
+        q_path = out_dir / "q.npy"
 
         todo_mask = np.ones(len(all_steps), dtype=bool)
         mode = "w+"
-        if keys_path.exists() and flow_path.exists():
+        if keys_path.exists() and flow_path.exists() and q_path.exists():
             cached_meta = {}
             try:
                 cached_meta = json.loads((out_dir / "meta.json").read_text())
@@ -172,9 +178,13 @@ def main():
                 or cached_meta.get("views") != list(video_keys)
             )
             cached = np.load(flow_path, mmap_mode="r")
+            cached_q = np.load(q_path, mmap_mode="r")
             shape_ok = cached.shape[1:] == (len(video_keys), token_hw[0], token_hw[1], 2)
-            if np.array_equal(np.load(keys_path), keys) and shape_ok and not meta_stale:
-                todo_mask = (~np.isfinite(np.asarray(cached))).any(axis=(1, 2, 3, 4))
+            q_shape_ok = cached_q.shape[1:] == (len(video_keys), token_hw[0], token_hw[1])
+            if np.array_equal(np.load(keys_path), keys) and shape_ok and q_shape_ok and not meta_stale:
+                todo_mask = (~np.isfinite(np.asarray(cached))).any(axis=(1, 2, 3, 4)) | (
+                    ~np.isfinite(np.asarray(cached_q))
+                ).any(axis=(1, 2, 3))
                 mode = "r+"
             else:
                 print(f"[{data_name}] stale cache (layout/shape/meta mismatch), rebuilding")
@@ -191,6 +201,11 @@ def main():
         )
         if mode == "w+":
             flow[:] = np.nan
+        q = np.lib.format.open_memmap(
+            q_path, mode=mode, dtype=np.float16, shape=(len(all_steps), V, token_hw[0], token_hw[1])
+        )
+        if mode == "w+":
+            q[:] = np.nan
         np.save(keys_path, keys)
 
         rows_by_trajectory = {}
@@ -260,7 +275,7 @@ def main():
                 img1_batch = [Image.fromarray(frame).resize(image_size) for frame in cur_frames]
                 img2_batch = [Image.fromarray(frame).resize(image_size) for frame in fut_frames]
                 del cur_frames, fut_frames
-                flow_pairs = []
+                flow_pairs, q_pairs = [], []
                 for batch_start in range(0, len(img1_batch), args.batch_size):
                     img1 = torch.stack(
                         [pil_to_tensor(im) for im in img1_batch[batch_start : batch_start + args.batch_size]]
@@ -272,8 +287,14 @@ def main():
                     img1, img2 = img1.to(device), img2.to(device)
                     with torch.inference_mode():
                         flow_full = raft(img1, img2)[-1]  # [B, 2, H, W]
+                        flow_bwd_full = raft(img2, img1)[-1]
+                        q_cells = flow_confidence_q(flow_full.float(), flow_bwd_full.float(), token_hw)
                     flow_pairs.append(flow_to_token_grid(flow_full.float().cpu(), token_hw).numpy())
+                    q_pairs.append(q_cells.cpu().numpy())
                 flow[np.array(valid_rows, dtype=np.int64), view_index] = np.concatenate(flow_pairs, axis=0).astype(
+                    np.float16
+                )
+                q[np.array(valid_rows, dtype=np.int64), view_index] = np.concatenate(q_pairs, axis=0).astype(
                     np.float16
                 )
         meta = {

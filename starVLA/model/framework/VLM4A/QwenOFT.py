@@ -176,12 +176,12 @@ class Qwenvl_OFT(baseframework):
         motion_cfg = self.config.framework.get("motion", None)
         self.motion_mode = motion_cfg.get("mode", "uniform") if motion_cfg else None
         if motion_cfg is not None:
-            if self.motion_mode not in ("uniform", "compat", "random", "shuffled"):
+            if self.motion_mode not in ("uniform", "compat", "shuffled"):
                 raise ValueError(f"unsupported framework.motion.mode {self.motion_mode}")
             self.motion_loss_weight = float(motion_cfg.get("loss_weight", 1.0))
-            self.motion_credit_tau = float(motion_cfg.get("credit_temperature", 1.0))
             self.motion_warmup_steps = int(self.config.trainer.num_warmup_steps)
             self.motion_head = MotionHead(self.qwen_vl_interface.model.config.hidden_size)
+            self._instruction_piece_cache: dict = {}
 
     def forward(
         self,
@@ -267,22 +267,40 @@ class Qwenvl_OFT(baseframework):
                 lam = self.motion_loss_weight
                 if step is not None and self.motion_warmup_steps:
                     lam = lam * min(step / self.motion_warmup_steps, 1.0)
-                if "flow_target" not in examples[0]:
+                if "flow_target" not in examples[0] or "flow_target_q" not in examples[0]:
                     raise ValueError(
-                        "framework.motion is enabled but flow_target is missing from the batch; "
-                        "enable datasets.vla_data.motion_flow_root"
+                        "framework.motion is enabled but flow_target/flow_target_q is missing from the batch; "
+                        "enable datasets.vla_data.motion_flow_root and rebuild the flow cache with the q contract"
                     )
                 motion_target = torch.as_tensor(
                     np.stack([example["flow_target"] for example in examples]), device=action_loss.device
                 ).float()  # [B, V, Ht, Wt, 2]; NaN marks anchors whose future frame left the episode
+                motion_q = torch.as_tensor(
+                    np.stack([example["flow_target_q"] for example in examples]), device=action_loss.device
+                ).float()  # [B, V, Ht, Wt]; q_i = q_min + (1 - q_min) q_cell, bounded in [q_min, 1]
                 visual_mask = qwen_inputs["input_ids"] == self.qwen_vl_interface.model.config.image_token_id
                 num_views = len(examples[0]["image"])
                 E_vis = self._gather_visual_token_embeddings(
                     entry_embeds, visual_mask, qwen_inputs["image_grid_thw"], num_views
                 )  # [B, V, Ht, Wt, D]
-                per_token_motion_loss, motion_valid = token_motion_loss(self.motion_head(E_vis.float()), motion_target)
+                z_lang = self._pool_instruction_entry_embeddings(entry_embeds, qwen_inputs, examples)  # [B, D]
+                per_token_motion_loss, motion_valid = token_motion_loss(
+                    self.motion_head(E_vis.float(), z_lang), motion_target
+                )
                 num_valid = motion_valid.sum()
-                if self.motion_mode in ("compat", "random", "shuffled"):
+                valid_f = motion_valid.to(per_token_motion_loss.dtype)
+                q_clean = torch.nan_to_num(motion_q)  # NaN only where validity is already zero
+                # Mean-one weight normalisation across the whole microbatch (samples x views x tokens).
+                q_bar = (valid_f * q_clean).sum() / (num_valid.float() + 1e-6)
+                result_motion = {
+                    "motion_valid_frac": num_valid.float() / motion_valid.numel(),
+                    "motion_lambda": action_loss.new_tensor(lam),
+                    "motion_q_mean": q_bar,
+                }
+                if self.motion_mode == "uniform":
+                    w = valid_f * q_clean / (q_bar + 1e-6)  # q~ = m q / (q_bar + eps), mean-one, bounded in [0.25, 4]
+                    motion_loss = (w * per_token_motion_loss).sum() / num_valid.clamp(min=1)
+                else:
                     if num_valid > 0:
                         g_A = self._gather_visual_token_embeddings(
                             torch.autograd.grad(action_loss, entry_embeds, retain_graph=True)[0],
@@ -297,29 +315,24 @@ class Qwenvl_OFT(baseframework):
                             qwen_inputs["image_grid_thw"],
                             num_views,
                         )  # [B, V, Ht, Wt, D]
-                        w, compat = motion_credit(
-                            per_token_motion_loss, g_A, g_M, motion_valid, self.motion_mode, self.motion_credit_tau
-                        )
+                        w, compat = motion_credit(g_A, g_M, motion_valid, motion_q, self.motion_mode)
+                        a = valid_f * q_clean * w  # a_i = m q w; the product is renormalised by its own sum
+                        motion_loss = (a * per_token_motion_loss).sum() / (a.sum() + 1e-6)
+                        motion_weight_eff = a
                     else:
-                        w = torch.zeros_like(per_token_motion_loss)
-                else:
-                    w = motion_valid.to(per_token_motion_loss.dtype)
-                motion_loss = (w * per_token_motion_loss).sum() / num_valid.clamp(min=1)
-
-                result_motion = {
-                    "motion_loss": motion_loss.detach(),
-                    "motion_valid_frac": num_valid.float() / motion_valid.numel(),
-                    "motion_lambda": action_loss.new_tensor(lam),
-                }
-                if compat is not None:
-                    result_motion["motion_compat_mean"] = (compat * motion_valid).sum() / num_valid.clamp(min=1)
-                    result_motion["motion_compat_std"] = compat[motion_valid].std(correction=0)
+                        motion_loss = action_loss.new_zeros(())
+                if num_valid > 0:
                     result_motion["motion_w_std"] = w[motion_valid].std(correction=0)
                     result_motion["motion_w_eff_ratio"] = num_valid.float() / (
                         (w * w)[motion_valid].sum().clamp(min=1e-12)
                     )
+
+                result_motion["motion_loss"] = motion_loss.detach()
+                if compat is not None:
+                    result_motion["motion_compat_mean"] = (compat * motion_valid).sum() / num_valid.clamp(min=1)
+                    result_motion["motion_compat_std"] = compat[motion_valid].std(correction=0)
                     gA_eff = g_A.float()
-                    gM_eff = lam * w.float().unsqueeze(-1) * g_M.float()
+                    gM_eff = lam * motion_weight_eff.float().unsqueeze(-1) * g_M.float()
                     gA_vec = gA_eff.reshape(-1)
                     gM_vec = gM_eff.reshape(-1)
                     gA_norm_global = gA_vec.norm().clamp(min=1e-6)
@@ -465,6 +478,53 @@ class Qwenvl_OFT(baseframework):
             raise RuntimeError("inconsistent image_grid_thw across batch views")
         token_hw = (int(image_grid_thw[0, 1]) // 2, int(image_grid_thw[0, 2]) // 2)
         return features[visual_mask].view(B, num_views, token_hw[0], token_hw[1], *features.shape[2:])
+
+    def _pool_instruction_entry_embeddings(self, entry_embeds, qwen_inputs, examples):
+        """
+        z_lang (docs/research/new_idea3.md): stop-gradient mean of the entry
+        embeddings at the raw natural-language instruction tokens (example["lang"]),
+        excluding the chat template, the discretised state block and the
+        action-prediction suffix. The instruction is the prefix of the rendered
+        prompt that ends right before the " [STATE]" anchor (state path) or the
+        action suffix (no-state path), so the span is located by finding that anchor
+        and taking len(example["lang"]) characters before it, then keeping only the
+        per-token decode pieces fully covered by that character span. The text path
+        is detached; LN(z_lang) + FiLM-adaptation run inside MotionHead.
+
+        :param entry_embeds: torch.Tensor, [B, L, D] language-model entry embeddings.
+        :param qwen_inputs: dict, preprocessed QwenVL inputs (input_ids on device).
+        :param examples: List[dict], raw batch entries (raw instruction in "lang").
+        :return: torch.Tensor [B, D], stop-gradient pooled entry embeddings.
+        """
+        input_ids = qwen_inputs["input_ids"]
+        tokenizer = self.qwen_vl_interface.processor.tokenizer
+        mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        for b, example in enumerate(examples):
+            pieces = [
+                self._instruction_piece_cache.setdefault(token_id, tokenizer.decode([token_id]))
+                for token_id in input_ids[b].tolist()
+            ]
+            text = "".join(pieces)
+            lang = example["lang"]
+            anchor = " [STATE]"
+            pos = text.find(anchor)
+            if pos < 0:
+                anchor = " Please predict the next "
+                pos = text.find(anchor)
+            if pos < 0:
+                raise ValueError(f"cannot locate the anchor {anchor!r} in the rendered instruction")
+            start = pos - len(lang)
+            if text[start:pos] != lang:
+                raise ValueError(f"the rendered prompt does not end with the raw instruction before {anchor!r}")
+            cum = 0
+            for j, piece in enumerate(pieces):
+                next_cum = cum + len(piece)
+                if piece and cum >= start and next_cum <= pos:
+                    mask[b, j] = True
+                cum = next_cum
+        if not mask.any(-1).all():
+            raise ValueError("the instruction token mask is empty for at least one sample")
+        return (entry_embeds.detach() * mask.unsqueeze(-1)).sum(1) / mask.sum(-1, keepdim=True).float()
 
     # Discretised state → instruction prefix (π₀.5 style); shared with QwenPI_v3.
     add_discretized_state_to_instruction = staticmethod(add_discretized_state_to_instruction)
