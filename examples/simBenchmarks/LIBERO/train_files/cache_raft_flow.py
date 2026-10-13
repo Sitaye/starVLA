@@ -131,12 +131,14 @@ def main():
         "patch": patch,
         "merge": merge,
         "resized_grid": [grid[1], grid[2]],
-        "stride": image_size[1] // token_hw[1],
+        # image_size is (W, H) in PIL order; x strided by W/W_tok, y by H/H_tok.
+        "stride_xy": [image_size[0] / token_hw[1], image_size[1] / token_hw[0]],
         "delta_step": args.delta_t,
-        "unit": "token-cell displacement (area-pooled RAFT flow divided by token stride)",
+        "unit": "token-cell displacement (area-pooled RAFT flow, horizontal / (W/W_tok), vertical / (H/H_tok))",
         "q_spec": (
-            "v1: F_b^w=grid_sample(F_{t+dt->t} at x+F_{t->t+dt}, align_corners=True, oob=0); "
-            "r=||F_f+F_b^w||_2 (token cells); T^2=||F_f||^2+||F_b^w||^2+1; "
+            "v3: F_b^w=grid_sample(F_{t+dt->t} at x+F_{t->t+dt}, align_corners=True, oob=0); "
+            "r=||F_f+F_b^w||_2 in pixels; T^2=0.01*(||F_f||^2+||F_b^w||^2)+0.5 (standard FB-consistency "
+            "occlusion scale, fixed initial definition); "
             "q=0.25+0.75*tokencell_mean(exp(-relu(r-T)/(T+1e-6)) * in_bounds)"
         ),
         "teacher": "torchvision.raft_large weights=Raft_Large_Weights.DEFAULT",
@@ -156,15 +158,24 @@ def main():
         )
         trajectory_length_by_id = dict(zip(dataset._trajectory_ids, dataset.trajectory_lengths, strict=True))
         delta0 = int(dataset.delta_indices[video_keys[0]][0])
-        valid_anchor_count = sum(
-            1
-            for trajectory_id, base_index in all_steps
-            if 0 <= base_index + delta0 + args.delta_t < trajectory_length_by_id[trajectory_id]
+        per_view_deltas = {int(dataset.delta_indices[key][0]) for key in video_keys}
+        if per_view_deltas != {delta0}:
+            raise ValueError(
+                f"per-view delta_indices differ ({per_view_deltas}); valid_anchor is defined per row"
+            )
+        # Rows whose future frame left the episode are NaN by contract (not incomplete work).
+        valid_anchor = np.array(
+            [
+                0 <= base_index + delta0 + args.delta_t < trajectory_length_by_id[trajectory_id]
+                for trajectory_id, base_index in all_steps
+            ],
+            dtype=bool,
         )
+        valid_anchor_count = int(valid_anchor.sum())
         flow_path, keys_path = out_dir / "flow.npy", out_dir / "keys.npy"
         q_path = out_dir / "q.npy"
 
-        todo_mask = np.ones(len(all_steps), dtype=bool)
+        todo_mask = valid_anchor
         mode = "w+"
         if keys_path.exists() and flow_path.exists() and q_path.exists():
             cached_meta = {}
@@ -174,17 +185,19 @@ def main():
                 pass  # missing/corrupt meta.json -> stale
             meta_stale = (
                 "num_valid_anchors" not in cached_meta
+                or cached_meta.get("num_valid_anchors") != valid_anchor_count
                 or any(cached_meta.get(k) != v for k, v in contract.items())
                 or cached_meta.get("views") != list(video_keys)
             )
             cached = np.load(flow_path, mmap_mode="r")
             cached_q = np.load(q_path, mmap_mode="r")
-            shape_ok = cached.shape[1:] == (len(video_keys), token_hw[0], token_hw[1], 2)
-            q_shape_ok = cached_q.shape[1:] == (len(video_keys), token_hw[0], token_hw[1])
+            shape_ok = cached.shape == (len(all_steps), len(video_keys), token_hw[0], token_hw[1], 2)
+            q_shape_ok = cached_q.shape == (len(all_steps), len(video_keys), token_hw[0], token_hw[1])
             if np.array_equal(np.load(keys_path), keys) and shape_ok and q_shape_ok and not meta_stale:
-                todo_mask = (~np.isfinite(np.asarray(cached))).any(axis=(1, 2, 3, 4)) | (
-                    ~np.isfinite(np.asarray(cached_q))
-                ).any(axis=(1, 2, 3))
+                todo_mask = valid_anchor & (
+                    (~np.isfinite(np.asarray(cached))).any(axis=(1, 2, 3, 4))
+                    | (~np.isfinite(np.asarray(cached_q))).any(axis=(1, 2, 3))
+                )
                 mode = "r+"
             else:
                 print(f"[{data_name}] stale cache (layout/shape/meta mismatch), rebuilding")
