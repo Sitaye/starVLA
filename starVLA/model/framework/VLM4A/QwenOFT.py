@@ -324,7 +324,15 @@ class Qwenvl_OFT(baseframework):
                             qwen_inputs["image_grid_thw"],
                             num_views,
                         )  # [B, V, Ht, Wt, D]
-                        w, compat, grad_frac, shuf_frac, shuf_l1 = motion_credit(
+                        gA_norm = g_A.float().norm(dim=-1)
+                        gM_norm = g_M.float().norm(dim=-1)
+                        result_motion["motion_grad_gA_norm_p5"] = torch.quantile(gA_norm[motion_valid], 0.05)
+                        result_motion["motion_grad_gA_norm_p50"] = torch.quantile(gA_norm[motion_valid], 0.5)
+                        result_motion["motion_grad_gA_norm_p95"] = torch.quantile(gA_norm[motion_valid], 0.95)
+                        result_motion["motion_grad_gM_norm_p5"] = torch.quantile(gM_norm[motion_valid], 0.05)
+                        result_motion["motion_grad_gM_norm_p50"] = torch.quantile(gM_norm[motion_valid], 0.5)
+                        result_motion["motion_grad_gM_norm_p95"] = torch.quantile(gM_norm[motion_valid], 0.95)
+                        w, compat, grad_frac, grad_frac_a, grad_frac_m, shuf_frac, shuf_l1 = motion_credit(
                             g_A, g_M, motion_valid, motion_q, self.motion_mode
                         )
                         a = valid_f * q_clean * w
@@ -338,6 +346,8 @@ class Qwenvl_OFT(baseframework):
                             motion_weight_eff[motion_valid].square().sum().clamp(min=1e-12)
                         )
                         result_motion["motion_grad_valid_frac"] = grad_frac
+                        result_motion["motion_grad_valid_frac_gA"] = grad_frac_a
+                        result_motion["motion_grad_valid_frac_gM"] = grad_frac_m
                         result_motion["motion_shuffled_changed_fraction"] = shuf_frac
                         result_motion["motion_shuffled_weight_l1"] = shuf_l1
                     else:

@@ -64,13 +64,17 @@ def motion_credit(
     :param w_mode: str, one of {"compat", "shuffled"}.
     :return: (w [B, V, H_tok, W_tok] detached, compat [B, V, H_tok, W_tok] detached,
              grad_valid_frac scalar detached = share of valid anchors that are rankable,
+             grad_frac_a / grad_frac_m scalars detached = shares of valid anchors passing each
+             single norm threshold (diagnostics: which leg shrinks the rankable pool),
              changed_fraction scalar detached = share of valid anchors whose w the shuffle moved (0 in compat mode),
              weight_l1 scalar detached = mean |Δw| of the shuffle (0 in compat mode)).
     """
     g_A = g_A_tok.float()
     g_M = g_M_tok.float()
     compat = F.cosine_similarity(g_A, g_M, dim=-1).detach()  # [B, V, H_tok, W_tok]
-    rankable = valid & (g_A.norm(dim=-1) > 1e-6) & (g_M.norm(dim=-1) > 1e-6)
+    gA_norm = g_A.norm(dim=-1)
+    gM_norm = g_M.norm(dim=-1)
+    rankable = valid & (gA_norm > 1e-6) & (gM_norm > 1e-6)
     w = valid.to(compat.dtype)
     for b in range(valid.shape[0]):
         for v in range(valid.shape[1]):
@@ -102,10 +106,14 @@ def motion_credit(
         weight_l1 = delta.abs().sum().float() / valid.sum().float().clamp(min=1)
         w = w_shuf
     grad_valid_frac = rankable.sum().float() / valid.sum().float().clamp(min=1)
+    grad_frac_a = (valid & (gA_norm > 1e-6)).sum().float() / valid.sum().float().clamp(min=1)
+    grad_frac_m = (valid & (gM_norm > 1e-6)).sum().float() / valid.sum().float().clamp(min=1)
     return (
         w.detach(),
         compat.detach(),
         grad_valid_frac.detach(),
+        grad_frac_a.detach(),
+        grad_frac_m.detach(),
         changed_fraction.detach(),
         weight_l1.detach(),
     )
