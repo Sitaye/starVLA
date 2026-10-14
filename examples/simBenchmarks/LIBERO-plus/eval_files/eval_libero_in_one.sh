@@ -36,6 +36,8 @@ num_tasks="${NUM_TASKS:--1}"
 tasks_per_gpu="${TASKS_PER_GPU:-3}"
 save_video="${SAVE_VIDEO:-false}"
 host="127.0.0.1"
+# tyro bool (default True) is a flag switch, not a valued option:
+if [[ "${save_video}" == "true" ]]; then video_args=(--args.save-video); else video_args=(--args.no-save-video); fi
 
 if [[ "${num_tasks}" -lt 0 ]]; then
   num_tasks=$("${LIBERO_PLUS_PYTHON}" -c "from libero.libero import benchmark; print(benchmark.get_benchmark_dict()['${task_suite_name}']().n_tasks)" | tail -n 1)
@@ -94,7 +96,7 @@ for ((i=0; i<tasks_per_gpu; i++)); do
         --args.log-path "$log_path" \
         --args.start-task-idx "$eval_start" \
         --args.end-task-idx "$eval_end" \
-        --args.save-video "$save_video" \
+        "${video_args[@]}" \
         2>&1 | tee "$p_log" &
     pids+=($!)
 
