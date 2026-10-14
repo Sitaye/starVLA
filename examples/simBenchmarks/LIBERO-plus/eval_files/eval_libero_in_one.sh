@@ -13,12 +13,12 @@ if [[ -z "${LIBERO_PLUS_HOME}" ]]; then
   exit 1
 fi
 
-# Scope every child process (server AND clients: EGL rendering, video IO) to the
-# requested GPU. The driver passes absolute GPU ids and does not pre-scope CVD.
-export CUDA_VISIBLE_DEVICES="${gpu_id}"
-# robosuite EGL falls back to CUDA_VISIBLE_DEVICES as the EGL device index when
-# MUJOCO_EGL_DEVICE_ID is unset; under CVD scoping only device 0 is enumerated.
-export MUJOCO_EGL_DEVICE_ID=0
+# Do NOT export CUDA_VISIBLE_DEVICES into the client tree: this robosuite asserts
+# MUJOCO_EGL_DEVICE_ID inside CVD, yet the driver enumerates only CVD-visible EGL
+# devices, so an absolute CVD index can never satisfy the EGL range check.
+# Clients touch the GPU only via EGL rendering, which MUJOCO_EGL_DEVICE_ID pins
+# to the requested physical GPU. The server gets a per-command CVD scope below.
+export MUJOCO_EGL_DEVICE_ID="${gpu_id}"
 
 cd "${STARVLA_DIR}"
 # user-facing vars above; package-facing aliases for the libero codebase below
@@ -46,7 +46,7 @@ if [[ "${num_tasks}" -lt 0 ]]; then
   num_tasks=$("${LIBERO_PLUS_PYTHON}" -c "from libero.libero import benchmark; print(benchmark.get_benchmark_dict()['${task_suite_name}']().n_tasks)" | tail -n 1)
 fi
 
-${STARVLA_PYTHON} deployment/model_server/server_policy.py \
+CUDA_VISIBLE_DEVICES="${gpu_id}" ${STARVLA_PYTHON} deployment/model_server/server_policy.py \
     --ckpt_path ${your_ckpt} \
     --port ${base_port} \
     --use_bf16 &

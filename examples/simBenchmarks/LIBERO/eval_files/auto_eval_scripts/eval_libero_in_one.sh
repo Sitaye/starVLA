@@ -30,13 +30,13 @@ host="127.0.0.1"
 # tyro bool (default True) is a flag switch, not a valued option:
 if [[ "${save_video}" == "true" ]]; then video_args=(--args.save-video); else video_args=(--args.no-save-video); fi
 
-# Scope every child process (server AND clients: EGL rendering, video IO) to the
-# requested GPU. The driver passes absolute GPU ids and does not pre-scope CVD.
-export CUDA_VISIBLE_DEVICES="${gpu_id}"
-# robosuite EGL falls back to CUDA_VISIBLE_DEVICES as the EGL device index when
-# MUJOCO_EGL_DEVICE_ID is unset; under CVD scoping only device 0 is enumerated.
-export MUJOCO_EGL_DEVICE_ID=0
-${STARVLA_PYTHON} deployment/model_server/server_policy.py \
+# Do NOT export CUDA_VISIBLE_DEVICES into the client tree: this robosuite asserts
+# MUJOCO_EGL_DEVICE_ID inside CVD, yet the driver enumerates only CVD-visible EGL
+# devices, so an absolute CVD index can never satisfy the EGL range check.
+# Clients touch the GPU only via EGL rendering, which MUJOCO_EGL_DEVICE_ID pins
+# to the requested physical GPU. The server gets a per-command CVD scope below.
+export MUJOCO_EGL_DEVICE_ID="${gpu_id}"
+CUDA_VISIBLE_DEVICES="${gpu_id}" ${STARVLA_PYTHON} deployment/model_server/server_policy.py \
     --ckpt_path ${your_ckpt} \
     --port ${base_port} \
     --use_bf16 &
