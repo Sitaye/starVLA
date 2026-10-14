@@ -16,6 +16,9 @@ fi
 # Scope every child process (server AND clients: EGL rendering, video IO) to the
 # requested GPU. The driver passes absolute GPU ids and does not pre-scope CVD.
 export CUDA_VISIBLE_DEVICES="${gpu_id}"
+# robosuite EGL falls back to CUDA_VISIBLE_DEVICES as the EGL device index when
+# MUJOCO_EGL_DEVICE_ID is unset; under CVD scoping only device 0 is enumerated.
+export MUJOCO_EGL_DEVICE_ID=0
 
 cd "${STARVLA_DIR}"
 # user-facing vars above; package-facing aliases for the libero codebase below
