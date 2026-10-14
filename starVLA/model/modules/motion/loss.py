@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 
 
 def token_motion_loss(pred_flow: torch.Tensor, target_flow: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -33,12 +32,17 @@ def motion_credit(
     Rank-based compatibility credit assignment for motion supervision
     (docs/research/new_idea3.md section 4.3).
 
-    C_ij = cos_fp32(g_A_ij, g_M_ij): per-token alignment between the action
-           gradient and the motion gradient at the representation coordinate.
-    Tokens whose motion target is valid but whose gradient norm is at the fp32
-    noise floor carry no interpretable cosine direction; they are excluded from
-    the ranking and keep the neutral weight w = 1 instead of being pushed to a
-    mid-range C = 0 score.
+    C_ij = cos(g_A_ij, g_M_ij) computed in fp64: per-token alignment between the
+           action gradient and the motion gradient at the representation
+           coordinate (bf16 inputs convert losslessly; fp64 removes fp32
+           accumulation error at D=1024).
+    Tokens whose motion target is valid but whose gradient is non-finite or an
+    exact zero vector carry no interpretable direction (the cosine is undefined
+    on a zero vector); they are excluded from the ranking and keep the neutral
+    weight w = 1 instead of being pushed to a mid-range C = 0 score. There is
+    deliberately no absolute norm threshold: low-norm but finite non-zero
+    gradients keep their ranking, and direction reliability at extreme norms
+    is an experimental question, not a universal constant.
     r_ij = AVERAGE ranknorm(C) over the rankable tokens of the SAME (sample, view):
            tied scores share the mean ordinal rank, so identical C maps to identical
            weights, an all-equal C maps every w to 1, and a single rankable token
@@ -65,16 +69,22 @@ def motion_credit(
     :return: (w [B, V, H_tok, W_tok] detached, compat [B, V, H_tok, W_tok] detached,
              grad_valid_frac scalar detached = share of valid anchors that are rankable,
              grad_frac_a / grad_frac_m scalars detached = shares of valid anchors passing each
-             single norm threshold (diagnostics: which leg shrinks the rankable pool),
+             single leg's finite-nonzero test (diagnostics: which leg shrinks the rankable pool),
              changed_fraction scalar detached = share of valid anchors whose w the shuffle moved (0 in compat mode),
              weight_l1 scalar detached = mean |Δw| of the shuffle (0 in compat mode)).
     """
-    g_A = g_A_tok.float()
-    g_M = g_M_tok.float()
-    compat = F.cosine_similarity(g_A, g_M, dim=-1).detach()  # [B, V, H_tok, W_tok]
-    gA_norm = g_A.norm(dim=-1)
-    gM_norm = g_M.norm(dim=-1)
-    rankable = valid & (gA_norm > 1e-6) & (gM_norm > 1e-6)
+    g_A64 = g_A_tok.detach().to(torch.float64)
+    g_M64 = g_M_tok.detach().to(torch.float64)
+    finite_a = torch.isfinite(g_A64).all(dim=-1)
+    finite_m = torch.isfinite(g_M64).all(dim=-1)
+    norm_A = torch.linalg.vector_norm(g_A64, dim=-1)
+    norm_M = torch.linalg.vector_norm(g_M64, dim=-1)
+    nonzero = (norm_A > 0) & (norm_M > 0)
+    rankable = valid & finite_a & finite_m & nonzero
+    dot = (g_A64 * g_M64).sum(dim=-1)
+    denom = (norm_A * norm_M).clamp_min(torch.finfo(torch.float64).tiny)
+    compat = (dot / denom).clamp(-1.0, 1.0)
+    compat = torch.where(rankable, compat, torch.zeros_like(compat)).detach().float()  # [B, V, H_tok, W_tok]
     w = valid.to(compat.dtype)
     for b in range(valid.shape[0]):
         for v in range(valid.shape[1]):
@@ -106,8 +116,8 @@ def motion_credit(
         weight_l1 = delta.abs().sum().float() / valid.sum().float().clamp(min=1)
         w = w_shuf
     grad_valid_frac = rankable.sum().float() / valid.sum().float().clamp(min=1)
-    grad_frac_a = (valid & (gA_norm > 1e-6)).sum().float() / valid.sum().float().clamp(min=1)
-    grad_frac_m = (valid & (gM_norm > 1e-6)).sum().float() / valid.sum().float().clamp(min=1)
+    grad_frac_a = (valid & finite_a & (norm_A > 0)).sum().float() / valid.sum().float().clamp(min=1)
+    grad_frac_m = (valid & finite_m & (norm_M > 0)).sum().float() / valid.sum().float().clamp(min=1)
     return (
         w.detach(),
         compat.detach(),
