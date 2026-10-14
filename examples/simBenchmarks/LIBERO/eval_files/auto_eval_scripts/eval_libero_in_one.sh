@@ -25,9 +25,13 @@ base_port=$4        # unique port for this eval instance
 num_trials_per_task=50
 num_tasks="${NUM_TASKS:-10}"
 tasks_per_gpu="${TASKS_PER_GPU:-3}"
+save_video="${SAVE_VIDEO:-false}"
 host="127.0.0.1"
 
-CUDA_VISIBLE_DEVICES=$gpu_id ${STARVLA_PYTHON} deployment/model_server/server_policy.py \
+# Scope every child process (server AND clients: EGL rendering, video IO) to the
+# requested GPU. The driver passes absolute GPU ids and does not pre-scope CVD.
+export CUDA_VISIBLE_DEVICES="${gpu_id}"
+${STARVLA_PYTHON} deployment/model_server/server_policy.py \
     --ckpt_path ${your_ckpt} \
     --port ${base_port} \
     --use_bf16 &
@@ -83,6 +87,7 @@ for ((i=0; i<tasks_per_gpu; i++)); do
         --args.log-path "$log_path" \
         --args.start-task-idx "$eval_start" \
         --args.end-task-idx "$eval_end" \
+        --args.save-video "$save_video" \
         2>&1 | tee "$p_log" &
     pids+=($!)
 

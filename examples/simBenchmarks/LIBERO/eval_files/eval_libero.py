@@ -60,6 +60,7 @@ class Args:
     # Utils
     #################################################################################################################
     video_out_path: str = "experiments/libero/logs"  # Path to save videos
+    save_video: bool = True  # Set False to skip mp4 encoding/storage (success-rate reporting unaffected)
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -236,12 +237,13 @@ def eval_libero(args: Args) -> None:
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
-            _VIDEO_WRITE_QUEUE.put(
-                (
-                    pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
-                    [np.asarray(x) for x in replay_images],
+            if args.save_video:
+                _VIDEO_WRITE_QUEUE.put(
+                    (
+                        pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
+                        [np.asarray(x) for x in replay_images],
+                    )
                 )
-            )
 
             full_actions = np.stack(full_actions)
             # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
