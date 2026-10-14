@@ -13,12 +13,10 @@ if [[ -z "${LIBERO_PLUS_HOME}" ]]; then
   exit 1
 fi
 
-# Do NOT export CUDA_VISIBLE_DEVICES into the client tree: this robosuite asserts
-# MUJOCO_EGL_DEVICE_ID inside CVD, yet the driver enumerates only CVD-visible EGL
-# devices, so an absolute CVD index can never satisfy the EGL range check.
-# Clients touch the GPU only via EGL rendering, which MUJOCO_EGL_DEVICE_ID pins
-# to the requested physical GPU. The server gets a per-command CVD scope below.
-export MUJOCO_EGL_DEVICE_ID="${gpu_id}"
+# Clients run on CPU (Mesa EGL swrast only — no NVIDIA EGL on this host): no
+# CUDA_VISIBLE_DEVICES scoping, no MUJOCO_EGL_DEVICE_ID pinning. Cap llvmpipe
+# threads so concurrent CPU-rendering clients do not oversubscribe cores.
+export LP_NUM_THREADS="${LP_NUM_THREADS:-4}"
 
 cd "${STARVLA_DIR}"
 # user-facing vars above; package-facing aliases for the libero codebase below
