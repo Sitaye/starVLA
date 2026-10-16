@@ -1,5 +1,24 @@
 import torch
 
+_SHUFFLE_GENERATORS: dict[tuple[torch.device, int], torch.Generator] = {}
+_SHUFFLE_SEED_SALT = 0x9E3779B97F4A7C15
+
+
+def _get_shuffle_generator(device: torch.device) -> torch.Generator:
+    """
+    Return a process-local Generator on ``device`` isolated from the default
+    CPU/CUDA RNG streams so ``w_mode="shuffled"`` never perturbs global RNG
+    state relative to ``uniform`` / ``compat`` / ``baseline``.
+    """
+    base_seed = torch.initial_seed()
+    key = (device, base_seed)
+    gen = _SHUFFLE_GENERATORS.get(key)
+    if gen is None:
+        gen = torch.Generator(device=device)
+        gen.manual_seed((base_seed ^ _SHUFFLE_SEED_SALT) & ((1 << 63) - 1))
+        _SHUFFLE_GENERATORS[key] = gen
+    return gen
+
 
 def token_motion_loss(pred_flow: torch.Tensor, target_flow: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -27,7 +46,16 @@ def motion_credit(
     valid: torch.Tensor,
     q_map: torch.Tensor,
     w_mode: str = "compat",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    generator: torch.Generator | None = None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """
     Rank-based compatibility credit assignment for motion supervision
     (docs/research/new_idea3.md section 4.3).
@@ -110,7 +138,7 @@ def motion_credit(
     changed_fraction = w.new_zeros(())
     weight_l1 = w.new_zeros(())
     if w_mode == "shuffled":
-        w_shuf = _shuffle_within_q_strata(w, q_map, valid, rankable)
+        w_shuf = _shuffle_within_q_strata(w, q_map, valid, rankable, generator=generator)
         delta = (w_shuf - w)[valid]
         changed_fraction = (delta != 0).sum().float() / valid.sum().float().clamp(min=1)
         weight_l1 = delta.abs().sum().float() / valid.sum().float().clamp(min=1)
@@ -135,6 +163,7 @@ def _shuffle_within_q_strata(
     valid: torch.Tensor,
     rankable: torch.Tensor,
     num_strata: int = 4,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """
     Break the w <-> token correspondence while preserving its distribution: within
@@ -142,15 +171,21 @@ def _shuffle_within_q_strata(
     rankable tokens' w values bijectively. Non-rankable valid tokens keep the
     neutral w = 1; tokens outside the valid anchors keep w = 0.
 
+    Uses an isolated per-device ``torch.Generator`` (unless ``generator`` is
+    explicitly supplied) so that permuting weights in ``shuffled`` mode does not
+    advance the global CPU/CUDA RNG state shared with the rest of training.
+
     :param w: torch.Tensor, [B, V, H_tok, W_tok], detached credit weights.
     :param q_map: torch.Tensor, [B, V, H_tok, W_tok], raw q_i confidence in [0.25, 1].
     :param valid: torch.Tensor, [B, V, H_tok, W_tok] bool, anchors with RAFT supervision.
     :param rankable: torch.Tensor, [B, V, H_tok, W_tok] bool, valid anchors with
         interpretable gradient directions; the permutation pool (subset of valid).
     :param num_strata: int, fixed equal-width bins on the q grid.
+    :param generator: optional ``torch.Generator`` on ``w.device`` for permutation sampling.
     :return: torch.Tensor, [B, V, H_tok, W_tok] permuted credit weights.
     """
     out = w.clone()
+    gen = generator if generator is not None else _get_shuffle_generator(w.device)
     edges = torch.linspace(0.25, 1.0, num_strata + 1, device=q_map.device)
     for b in range(valid.shape[0]):
         for v in range(valid.shape[1]):
@@ -162,5 +197,6 @@ def _shuffle_within_q_strata(
                 if idx[0].numel() < 2:
                     continue
                 vals = out[b, v][idx]
-                out[b, v][idx[0], idx[1]] = vals[torch.randperm(vals.numel(), device=vals.device)]
+                perm = torch.randperm(vals.numel(), generator=gen, device=vals.device)
+                out[b, v][idx[0], idx[1]] = vals[perm]
     return out
