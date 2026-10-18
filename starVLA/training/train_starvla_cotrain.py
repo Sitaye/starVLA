@@ -40,6 +40,7 @@ from starVLA.training.trainer_utils.trainer_tools import TrainerUtils, build_par
 
 deepspeed_plugin = DeepSpeedPlugin()
 accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
+
 accelerator.print(accelerator.state)
 
 # Sane Defaults
@@ -318,7 +319,11 @@ class VLAMTrainer(TrainerUtils):
             if optimizer_stepped:
                 self._log_metrics(step_metrics)
 
-            if optimizer_stepped and self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
+            if (
+                optimizer_stepped
+                and self.completed_steps % self.config.trainer.save_interval == 0
+                and self.completed_steps > 0
+            ):
                 self._save_checkpoint()
                 if dist.is_initialized():
                     dist.barrier()
@@ -328,7 +333,7 @@ class VLAMTrainer(TrainerUtils):
 
         self._finalize_training()
 
-    def eval_action_model(self, step_metrics: dict = None) -> float:
+    def eval_action_model(self, step_metrics: dict | None = None) -> float:
         """Evaluate action prediction with current model."""
         if self.accelerator.is_main_process:
             examples, _ = self._get_next_batch()
@@ -453,6 +458,24 @@ class VLAMTrainer(TrainerUtils):
 
 def main(cfg) -> None:
     logger.info("VLA Training :: Warming Up")
+
+    # GA guard: the YAML's trainer.gradient_accumulation_steps is informational
+    # only — the effective value comes from the accelerate/DeepSpeed config, and
+    # the 80k run was launched with a silent GA=4-vs-1 mismatch. Must run before
+    # wrap_config: OmegaConf.select doesn't work on AccessTrackedConfig.
+    cfg_ga = OmegaConf.select(cfg, "trainer.gradient_accumulation_steps")
+    if cfg_ga is not None and int(cfg_ga) != int(accelerator.gradient_accumulation_steps):
+        if os.environ.get("STARVLA_ALLOW_GA_MISMATCH", "0") != "1":
+            raise SystemExit(
+                f"Config mismatch: trainer.gradient_accumulation_steps={int(cfg_ga)} in YAML "
+                f"but the effective (accelerate/DeepSpeed) value is "
+                f"{accelerator.gradient_accumulation_steps}. Fix the YAML or the "
+                "DeepSpeed config; export STARVLA_ALLOW_GA_MISMATCH=1 to override."
+            )
+        logger.warning(
+            f"GA mismatch tolerated via STARVLA_ALLOW_GA_MISMATCH=1: "
+            f"YAML={int(cfg_ga)}, effective={accelerator.gradient_accumulation_steps}"
+        )
 
     cfg = wrap_config(cfg)
     logger.info("✅ Configuration wrapped for access tracking")

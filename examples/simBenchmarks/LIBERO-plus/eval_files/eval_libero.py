@@ -31,6 +31,30 @@ def _write_videos_forever():
         _VIDEO_WRITE_QUEUE.task_done()
 
 
+def _dump_partial_results(args, eval_end: int, disturb_res: dict) -> None:
+    """Atomically write shard results to <log_path>/<start>_to_<end>.json.
+
+    Plus rewrites this file after every task; an atomic replace shrinks the
+    truncation window for any concurrent reader (aggregator/monitor) to
+    microseconds instead of the whole dump.
+    """
+    out_path = pathlib.Path(args.log_path) / f"{args.start_task_idx}_to_{eval_end}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(disturb_res, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, out_path)
+    except OSError:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
     arr = np.asarray(open_val, dtype=np.float32).reshape(-1)
     v = float(arr[0])
@@ -42,7 +66,7 @@ def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
 class Args:
     host: str = "127.0.0.1"
     port: int = 10093
-    resize_size = [224, 224]
+    resize_size: tuple = (224, 224)
 
     #################################################################################################################
     # LIBERO-Plus environment-specific parameters
@@ -112,8 +136,15 @@ def eval_libero_plus(args: Args) -> None:
 
     disturb_res = {}
     LIBERO_PLUS_HOME = os.environ.get("LIBERO_PLUS_HOME", "path_to_LIBERO_PLUS_HOME")
-    with open(os.path.join(LIBERO_PLUS_HOME, "libero/libero/benchmark/task_classification.json")) as f:
-        TASK_MAPPING = json.load(f)[args.task_suite_name]
+    classification_path = os.path.join(LIBERO_PLUS_HOME, "libero/libero/benchmark/task_classification.json")
+    try:
+        with open(classification_path, encoding="utf-8") as f:
+            TASK_MAPPING = json.load(f)[args.task_suite_name]
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"Cannot load task classification from {classification_path} "
+            f"(suite={args.task_suite_name}): {exc}"
+        ) from exc
     ID2CATEGORY = {}
     for item in TASK_MAPPING:
         category = item["category"]
@@ -169,7 +200,7 @@ def eval_libero_plus(args: Args) -> None:
                 # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
                 # and we need to wait for them to fall
                 if t < args.num_steps_wait:
-                    obs, reward, done, info = env.step(LIBERO_PLUS_DUMMY_ACTION)
+                    obs, _, done, _ = env.step(LIBERO_PLUS_DUMMY_ACTION)
                     t += 1
                     continue
 
@@ -207,7 +238,7 @@ def eval_libero_plus(args: Args) -> None:
                 response = client_model.step(example=example_dict, step=step)
 
                 end_time = time.time()
-                # print(f"time: {end_time - start_time}")
+                logging.debug(f"Step latency: {end_time - start_time:.2f}s")
 
                 # #
                 raw_action = response["raw_action"]
@@ -234,7 +265,7 @@ def eval_libero_plus(args: Args) -> None:
 
                 # __import__("ipdb").set_trace()
                 # see ../robosuite/controllers/controller_factory.py
-                obs, reward, done, info = env.step(delta_action.tolist())
+                obs, _, done, _ = env.step(delta_action.tolist())
                 if done:
                     task_successes += 1
                     total_successes += 1
@@ -249,7 +280,6 @@ def eval_libero_plus(args: Args) -> None:
 
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
 
             if args.save_video:
                 _VIDEO_WRITE_QUEUE.put(
@@ -266,8 +296,7 @@ def eval_libero_plus(args: Args) -> None:
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
         # Log final results
-        with open(os.path.join(args.log_path, f"{args.start_task_idx}_to_{eval_end}.json"), "w", encoding="utf-8") as f:
-            json.dump(disturb_res, f)
+        _dump_partial_results(args, eval_end, disturb_res)
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
     _VIDEO_WRITE_QUEUE.join()

@@ -4,6 +4,7 @@ set -euo pipefail
 STARVLA_DIR="${STARVLA_DIR:-$(cd "$(dirname "$0")/../../../../.." && pwd)}"
 cd "${STARVLA_DIR}"
 SCRIPT_PATH="./examples/simBenchmarks/LIBERO/eval_files/auto_eval_scripts/eval_libero_in_one.sh"
+STARVLA_PYTHON="${STARVLA_PYTHON:-python}"
 
 ###############################################################################
 # ============ USER CONFIG: modify this section ============
@@ -24,8 +25,9 @@ TASK_SUITES=(libero_10 libero_goal libero_object libero_spatial)
 # --- Available GPUs (least-loaded selection, capped by MAX_JOBS_PER_GPU) ---
 GPU_LIST=(0 1 2 3 4 5 6 7)
 
-# --- Base port (each job gets base_port + job_index) ---
-BASE_PORT=6450
+# --- Base port (each job gets base_port + job_index; env-overridable so two
+# --- concurrent eval runs on the same node never collide) ---
+BASE_PORT="${BASE_PORT:-6450}"
 
 # --- Seconds to wait between launching jobs on the SAME GPU ---
 SLEEP_BETWEEN=20
@@ -51,6 +53,7 @@ gpu_job_count=()  # active jobs per GPU (for slot throttling)
 gpu_job_total=()  # cumulative jobs dispatched per GPU
 MAX_JOBS_PER_GPU="${MAX_JOBS_PER_GPU:-1}"  # per-GPU concurrency cap (VRAM-safe: server bf16 + 3 clients ≈ 6-8GB per job)
 declare -A PID_GPU=()  # pid -> gpu_idx
+declare -A JOB_LABEL=() # pid -> "ckpt:task"
 
 # Initialize GPU job counts
 for ((i=0; i<num_gpus; i++)); do
@@ -101,6 +104,7 @@ for ckpt in "${CKPT_LIST[@]}"; do
         bash "$SCRIPT_PATH" "$ckpt" "$task" "$gpu_id" "$port" &
         pids+=($!)
         PID_GPU[$!]=$gpu_idx
+        JOB_LABEL[$!]="${ckpt_name}:${task}"
 
         gpu_job_count[$gpu_idx]=$(( ${gpu_job_count[$gpu_idx]} + 1 ))
         gpu_job_total[$gpu_idx]=$(( ${gpu_job_total[$gpu_idx]} + 1 ))
@@ -110,10 +114,43 @@ for ckpt in "${CKPT_LIST[@]}"; do
     done
 done
 
-# Wait for all jobs to finish
+# Wait for all jobs, tracking failures (no silent swallowing).
+fail_count=0
+failed_jobs=()
 echo "--- All jobs launched (${job_index} total). Waiting for completion... ---"
 for pid in "${pids[@]}"; do
-    wait "$pid" 2>/dev/null || true
+    if ! wait "$pid"; then
+        echo "[WARN] Eval job FAILED: ${JOB_LABEL[$pid]:-unknown} (pid=${pid}; see its part logs)."
+        failed_jobs+=("${JOB_LABEL[$pid]:-unknown}")
+        fail_count=$((fail_count + 1))
+    fi
+done
+
+# Final pass per checkpoint: rebuild suite aggregates + overall_results.json.
+# Per-suite task_results.json (expected-total-checked) was written by each
+# in_one job; this pass adds overall over all suites. Checkpoints with any
+# failed job are skipped: a partial overall_results.json must never be written.
+AGGREGATOR="./examples/simBenchmarks/LIBERO-plus/eval_files/parallel_eval/aggregate_results.py"
+for ckpt in "${CKPT_LIST[@]}"; do
+    ckpt_dir=$(dirname "$ckpt")
+    eval_name=$(basename "$ckpt" .pt)
+    if [[ " ${failed_jobs[*]:-} " == *" ${eval_name}:"* ]]; then
+        echo "[SKIP] Final aggregation skipped for ${eval_name} (had failed eval jobs)"
+        continue
+    fi
+    eval_root="${ckpt_dir}/${eval_name}"
+    suites_csv=""
+    for suite in "${TASK_SUITES[@]}"; do
+        if [[ -n "$suites_csv" ]]; then suites_csv="${suites_csv},"; fi
+        suites_csv="${suites_csv}${suite}"
+    done
+    if ! "${STARVLA_PYTHON}" "$AGGREGATOR" \
+        --root_path "${eval_root}" \
+        --suites "${suites_csv}" \
+        --write-overall; then
+        echo "[WARN] Final aggregation failed for ${eval_root}"
+        fail_count=$((fail_count + 1))
+    fi
 done
 
 echo "=========================================="
@@ -123,3 +160,9 @@ for ((i=0; i<num_gpus; i++)); do
     echo "   GPU ${GPU_LIST[$i]}: ${gpu_job_total[$i]} jobs"
 done
 echo "=========================================="
+echo " Failed jobs: ${fail_count}"
+if (( fail_count > 0 )); then
+    printf '   - %s\n' "${failed_jobs[@]}"
+fi
+
+exit "$(( fail_count > 0 ? 1 : 0 ))"

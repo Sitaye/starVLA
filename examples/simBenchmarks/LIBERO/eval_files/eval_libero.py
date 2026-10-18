@@ -76,6 +76,30 @@ class Args:
     log_path: str = "experiments/libero/logs"
 
 
+def _dump_partial_results(args, eval_end: int, task_results: dict) -> None:
+    """Atomically write shard results to <log_path>/<start>_<end>.json.
+
+    The aggregator reads shard files only after all shards exit 0, but the
+    write must still be atomic so a concurrent reader (or a crashed writer
+    racing its own final dump) never observes a truncated file.
+    """
+    out_path = pathlib.Path(args.log_path) / f"{args.start_task_idx}_{eval_end}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(task_results, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, out_path)
+    except OSError:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def eval_libero(args: Args) -> None:
     logging.info(f"Arguments: {json.dumps(dataclasses.asdict(args), indent=4)}")
 
@@ -159,7 +183,7 @@ def eval_libero(args: Args) -> None:
                 # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
                 # and we need to wait for them to fall
                 if t < args.num_steps_wait:
-                    obs, reward, done, info = env.step(LIBERO_DUMMY_ACTION)
+                    obs, _, done, _ = env.step(LIBERO_DUMMY_ACTION)
                     t += 1
                     continue
 
@@ -192,11 +216,9 @@ def eval_libero(args: Args) -> None:
                 }
 
                 start_time = time.time()
-
                 response = client_model.step(example=example_dict, step=step)
-
                 end_time = time.time()
-                # print(f"time: {end_time - start_time}")
+                logging.debug(f"Step latency: {end_time - start_time:.2f}s")
 
                 # #
                 raw_action = response["raw_action"]
@@ -223,7 +245,7 @@ def eval_libero(args: Args) -> None:
 
                 # __import__("ipdb").set_trace()
                 # see ../robosuite/controllers/controller_factory.py
-                obs, reward, done, info = env.step(delta_action.tolist())
+                obs, _, done, _ = env.step(delta_action.tolist())
                 if done:
                     task_successes += 1
                     total_successes += 1
@@ -246,7 +268,7 @@ def eval_libero(args: Args) -> None:
                 )
 
             full_actions = np.stack(full_actions)
-            # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
+            # replay .npy dumps disabled for disk budget; re-enable if needed
 
             # print(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4")
             # Log current results
@@ -259,9 +281,9 @@ def eval_libero(args: Args) -> None:
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
-    pathlib.Path(args.log_path).mkdir(parents=True, exist_ok=True)
-    with open(pathlib.Path(args.log_path) / f"{args.start_task_idx}_{eval_end}.json", "w", encoding="utf-8") as f:
-        json.dump(task_results, f)
+        # Checkpoint partial results after every task (atomic replace): a crash
+        # mid-task no longer loses all progress of this shard.
+        _dump_partial_results(args, eval_end, task_results)
 
     _VIDEO_WRITE_QUEUE.join()
 

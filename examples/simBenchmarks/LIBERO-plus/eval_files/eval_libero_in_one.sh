@@ -40,6 +40,28 @@ host="127.0.0.1"
 # tyro bool (default True) is a flag switch, not a valued option:
 if [[ "${save_video}" == "true" ]]; then video_args=(--args.save-video); else video_args=(--args.no-save-video); fi
 
+# Block until the policy server is actually listening, or fail fast when it
+# crashed at startup (bad ckpt path, CUDA OOM, port in use). Without this gate,
+# all shards would hammer a dead port and burn the whole GPU-time slice.
+wait_for_server() {
+    local pid="$1" port="$2"
+    local timeout="${SERVER_START_TIMEOUT:-600}" waited=0
+    while kill -0 "${pid}" 2>/dev/null; do
+        if timeout 2 bash -c "echo > '/dev/tcp/127.0.0.1/${port}'" 2>/dev/null; then
+            echo "[server] listening on port ${port} (pid ${pid})"
+            return 0
+        fi
+        if (( waited >= timeout )); then
+            echo "[ERROR] Server (pid ${pid}) did not open port ${port} within ${timeout}s."
+            return 1
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    echo "[ERROR] Server process (pid ${pid}) exited before opening port ${port}."
+    return 1
+}
+
 if [[ "${num_tasks}" -lt 0 ]]; then
   num_tasks=$("${LIBERO_PLUS_PYTHON}" -c "from libero.libero import benchmark; print(benchmark.get_benchmark_dict()['${task_suite_name}']().n_tasks)" | tail -n 1)
 fi
@@ -50,6 +72,11 @@ CUDA_VISIBLE_DEVICES="${gpu_id}" ${STARVLA_PYTHON} deployment/model_server/serve
     --use_bf16 &
 
 server_pid=$!
+
+if ! wait_for_server "${server_pid}" "${base_port}"; then
+    kill "${server_pid}" 2>/dev/null || true
+    exit 1
+fi
 
 # Put logs/videos/aggregate under a per-checkpoint folder:
 #   <ckpt_dir>/<ckpt basename without ext>/{videos,logs,overall_results.json}
@@ -62,6 +89,12 @@ video_out_path="${eval_root}/videos/${task_suite_name}"
 log_path="${eval_root}/logs/${task_suite_name}"
 mkdir -p "$video_out_path"
 mkdir -p "$log_path"
+
+# This job owns <eval_root>/logs/<suite>: clear stale shard/aggregate JSONs from
+# any earlier attempt of the same checkpoint before launching new parts, so the
+# aggregator can never mix old shards with new ones.
+rm -f "${log_path}"/*.json
+rm -f "${eval_root}/overall_results.json"
 
 start_idx=0
 total=$((num_tasks))
@@ -87,7 +120,10 @@ for ((i=0; i<tasks_per_gpu; i++)); do
     fi
     echo "Part ${i}: tasks [${eval_start}, ${eval_end}) -> ${p_log}"
 
-    "${LIBERO_PLUS_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/eval_libero.py \
+    # pipefail inside a subshell: tee must not swallow the python exit code,
+    # otherwise a crashed shard would silently count as success.
+    ( set -o pipefail; \
+      "${LIBERO_PLUS_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/eval_libero.py \
         --args.pretrained-path "${your_ckpt}" \
         --args.host "$host" \
         --args.port "$base_port" \
@@ -98,7 +134,7 @@ for ((i=0; i<tasks_per_gpu; i++)); do
         --args.start-task-idx "$eval_start" \
         --args.end-task-idx "$eval_end" \
         "${video_args[@]}" \
-        2>&1 | tee "$p_log" &
+        2>&1 | tee "$p_log" ) &
     pids+=($!)
 
     start_idx=$current_end
@@ -112,14 +148,27 @@ for part_pid in "${pids[@]}"; do
     wait "$part_pid" || fail=1
 done
 
-"${STARVLA_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/parallel_eval/aggregate_results.py \
-    --root_path "${eval_root}" || fail=1
+if (( fail != 0 )); then
+    echo "[ERROR] One or more eval shards failed (see part logs in ${log_path}); skipping aggregation."
+    if [ -n "$server_pid" ]; then
+        kill "$server_pid" 2>/dev/null || true
+    fi
+    exit 1
+fi
 
-echo "Evaluation completed. Videos in ${video_out_path}, logs in ${log_path}, results at ${log_path}/task_results.json, aggregates at ${eval_root}/overall_results.json"
+# Aggregate only THIS suite (siblings sharing eval_root run concurrently;
+# overall_results.json is written once by the auto-eval final pass).
+"${STARVLA_PYTHON}" ./examples/simBenchmarks/LIBERO-plus/eval_files/parallel_eval/aggregate_results.py \
+    --root_path "${eval_root}" \
+    --suites "${task_suite_name}" \
+    --expected-total "$((num_tasks * num_trials_per_task))" \
+    || fail=1
+
+echo "Evaluation completed. Videos in ${video_out_path}, logs in ${log_path}, per-suite results in ${log_path}/task_results.json"
 
 if [ -n "$server_pid" ]; then
     echo "Killing server process with PID: $server_pid"
-    kill $server_pid
+    kill "$server_pid" 2>/dev/null || true
 else
     echo "No server process found to kill."
 fi

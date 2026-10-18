@@ -37,11 +37,14 @@ datasets:
 
   vla_data:
     dataset_py: lerobot_datasets
-    data_root_dir: /defaultShare/pubdata/OXE_LEROBOT_DATASET/libero_no_noops_1.0.0_lerobot/
+    data_root_dir: >-
+      /defaultShare/pubdata/OXE_LEROBOT_DATASET/libero_no_noops_1.0.0_lerobot/
     data_mix: libero_all # libero_goal
     action_type: delta_qpos
     sequential_step_sampling: False
-    CoT_prompt: "Your task is {instruction}. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format."
+    CoT_prompt: >-
+      Your task is {instruction}. To identify the key objects for your task.
+      Locate their bounding boxes in [x1,y1,x2,y2] format.
     per_device_batch_size: 16
     load_all_data_for_training: true
     video_backend: pyav
@@ -68,7 +71,12 @@ trainer:
   weight_decay: 0.0
   logging_frequency: 10
   gradient_clipping: 1.0
-  gradient_accumulation_steps: 4
+  # NOTE: this key is informational only — the effective gradient accumulation
+  # comes from the accelerate/DeepSpeed config (starVLA/config/deepseeds/
+  # ds_config.yaml, GA=1). Trainer startup fails loudly on mismatch unless
+  # STARVLA_ALLOW_GA_MISMATCH=1 is set.
+  # Effective global batch = per_device_batch_size × world_size × GA.
+  gradient_accumulation_steps: 1
   gradient_checkpointing: true
 
   optimizer:
