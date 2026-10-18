@@ -255,6 +255,7 @@ def run_export(args: argparse.Namespace) -> None:
 
     horizon = int(qwen_oft.action_horizon)
     state_rows: dict[str, dict] = {}
+    skip_ledger: dict[str, dict] = {}  # episode_id -> {"skipped": int, "errors": {type: count}}
     batch_samples: list[tuple[str, int, dict]] = []  # (episode_id, step, sample)
 
     def _flush() -> None:
@@ -291,12 +292,28 @@ def run_export(args: argparse.Namespace) -> None:
                 "task": task,
             }
             for local_idx in row_indices[:: max(args.stride, 1)]:
-                sample = single[local_idx]
+                try:
+                    sample = single[local_idx]
+                except Exception as exc:
+                    # Corrupt/truncated videos surface here (pyav InvalidDataError, fs
+                    # OSError): skip the row and record it. Anything else is our bug -
+                    # still raise.
+                    if not _is_decode_error(exc):
+                        raise
+                    step = int(single.all_steps[local_idx][1])
+                    _record_skip(skip_ledger, episode_id, step, exc)
+                    continue
                 step = int(single.all_steps[local_idx][1])
                 batch_samples.append((episode_id, step, sample))
                 if len(batch_samples) >= args.batch_size:
                     _flush()
     _flush()
+    # Drop fully-empty episodes (every row unreadable): they carry no data and an all-
+    # zero npz would poison the keys join downstream.
+    empty_eps = [ep for ep, rec in state_rows.items() if not rec["steps"]]
+    for ep in empty_eps:
+        del state_rows[ep]
+    _write_skip_ledger(out_dir, skip_ledger, empty_eps, args, state_rows)
     _write_shards(out_dir, state_rows, manifest, horizon)
 
 
@@ -318,6 +335,60 @@ def _add_batch_rows(state_rows: dict, batch_samples: list, pred_out: dict, horiz
 
 def args_holdout_size(manifest: dict) -> str:
     return str(manifest.get("primary_holdout_size", 2500))
+
+
+def _is_decode_error(exc: BaseException) -> bool:
+    """True for unreadable-media failures (pyav decode/open errors, fs OSError).
+
+    Dataset video copies can contain corrupt packets (av.error.InvalidDataError et
+    al.); those rows are skipped and recorded. Everything else - i.e. our own bugs -
+    must propagate.
+    """
+    return exc.__class__.__module__.startswith("av.") or isinstance(exc, OSError)
+
+
+def _record_skip(ledger: dict, episode_id: str, step: int, exc: BaseException) -> None:
+    rec = ledger.setdefault(episode_id, {"skipped": 0, "first_steps": [], "errors": {}})
+    rec["skipped"] += 1
+    if len(rec["first_steps"]) < 20:
+        rec["first_steps"].append(step)  # for cross-checking against the video file
+    name = f"{exc.__class__.__module__}.{exc.__class__.__name__}"
+    rec["errors"][name] = rec["errors"].get(name, 0) + 1
+    if rec["skipped"] <= 3:
+        print(f"[export] skip {episode_id} step {step}: {name}: {exc}")
+
+
+def _write_skip_ledger(
+    out_dir: Path,
+    ledger: dict,
+    empty_eps: list[str],
+    args: argparse.Namespace,
+    state_rows: dict,
+) -> None:
+    """Record skipped/unreadable rows per episode (one file per shard, no collision)."""
+    if not ledger and not empty_eps:
+        return
+    payload = {
+        "shard_index": args.shard_index,
+        "num_shards": args.num_shards,
+        "skipped_rows_total": int(sum(rec["skipped"] for rec in ledger.values())),
+        "episodes": {
+            ep: {
+                "skipped_rows": rec["skipped"],
+                "first_skipped_steps": rec["first_steps"],
+                "errors": rec["errors"],
+                "exported_rows": len(state_rows.get(ep, {}).get("steps", [])),
+                "fully_excluded": ep in empty_eps,
+            }
+            for ep, rec in sorted(ledger.items())
+        },
+    }
+    path = out_dir / f"excluded_shard_{args.shard_index}.json"
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    n_eps = len(payload["episodes"])
+    n_full = sum(1 for rec in payload["episodes"].values() if rec["fully_excluded"])
+    print(f"[export] shard {args.shard_index}: skipped {payload['skipped_rows_total']} rows in "
+          f"{n_eps} episodes ({n_full} fully excluded) -> {path}")
 
 
 def _write_shards(
