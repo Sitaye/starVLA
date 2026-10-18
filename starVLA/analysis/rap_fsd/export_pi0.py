@@ -139,6 +139,11 @@ def _predict_batch(qwen_oft, examples: list[dict], device: str) -> dict:
     """
     import torch
 
+    # Export-only process: nothing here calls .backward(), but without disabling grad the
+    # backbone forward retains a full autograd graph (peak GPU memory was ~10x a no_grad
+    # forward and OOMed large batches).
+    torch.set_grad_enabled(False)
+
     from deployment.model_server.tools.image_tools import to_pil_preserve
     from starVLA.model.framework.VLM4A.QwenOFT import assemble_prompts
     from starVLA.training.trainer_utils.trainer_tools import resize_images
