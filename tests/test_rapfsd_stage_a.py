@@ -358,3 +358,42 @@ def test_controls_unequal_fold_lengths():
     result = rsa._controls(fold_models, pools, holdout, k_star, args, a_tilde_avg)
     for arm in ("rrr", "random_subspace", "reversed_time"):
         assert np.isfinite(result[arm]["delta_r2_k_star"]), arm
+
+
+# ---------------------------------------------------------------------------
+# 10. v1.2.2 anchor (R_A = A - pred_A0, C_ext = C union pred_A0) + v1.3 plateau k* rule
+# ---------------------------------------------------------------------------
+def test_apply_anchor_literal_design():
+    from starVLA.analysis.rap_fsd import run_stage_a as rsa
+
+    rng = np.random.default_rng(0)
+    a = rng.normal(size=(50, 56))
+    pred = rng.normal(size=(50, 56))
+    c = rng.normal(size=(50, 12))
+    layout = {"lang": [0, 2], "evis_pooled": [2, 8], "state": [10, 2]}
+    r_a, c_ext, layout_ext = rsa.apply_anchor(a, pred, c, layout)
+    np.testing.assert_allclose(r_a, a - pred)
+    assert c_ext.shape == (50, 68)
+    assert layout_ext["pred_a0"] == [12, 56]
+    assert layout_ext["evis_pooled"] == [2, 8]  # existing offsets survive the append
+    with pytest.raises(RuntimeError, match="inconsistent"):
+        rsa.apply_anchor(a[:-1], pred, c, layout)
+
+
+def test_select_k_star_plateau_rule():
+    from types import SimpleNamespace
+
+    from starVLA.analysis.rap_fsd import run_stage_a as rsa
+
+    def _model(curve):
+        return SimpleNamespace(oof_curve=curve)
+
+    folds = {"fold_0": None, "fold_1": None}
+    curves = {4: 0.30, 8: 0.575, 16: 0.60}
+    # SE(100, 16) = sqrt(32)/100 = 0.0566 -> threshold 0.5434 -> plateau {8, 16}, min wins
+    folds = {f: _model(curves) for f in folds}
+    k_star, val, info = rsa.select_k_star(folds, 100)
+    assert k_star == 8 and abs(val - 0.575) < 1e-12 and info["k_max"] == 16
+    curves2 = {4: 0.30, 8: 0.32, 16: 0.60}
+    k_star2, _, _ = rsa.select_k_star({f: _model(curves2) for f in ("fold_0", "fold_1")}, 100)
+    assert k_star2 == 16  # distinct maximum survives the plateau rule

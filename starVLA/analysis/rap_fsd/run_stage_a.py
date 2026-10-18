@@ -48,8 +48,9 @@ class Universe:
     step: list[int] = field(default_factory=list)
     label: list[str] = field(default_factory=list)
     f_raw: np.ndarray | None = None  # [n, d_F] float64 flattened flow (raw)
-    r_a: np.ndarray | None = None  # [n, 56] ground-truth normalized actions
-    c: np.ndarray | None = None  # [n, D_C] context features
+    a_raw: np.ndarray | None = None  # [n, 56] ground-truth normalized actions (pre-anchor)
+    r_a: np.ndarray | None = None  # [n, 56] anchored residual R_A = A - pred_A0 (v1.2.2)
+    c: np.ndarray | None = None  # [n, D_C] context features (C_ext = C union pred_A0)
     qbar: np.ndarray | None = None  # [n] flow cache mean q (NaN when cache absent)
     c_layout: dict | None = None
     nan_excluded: int = 0
@@ -79,6 +80,7 @@ class RowPool:
     label: str
     f: np.ndarray | None = None  # raw flattened flow
     r_a: np.ndarray | None = None
+    a_raw: np.ndarray | None = None
     c: np.ndarray | None = None
     episode_id: np.ndarray | None = None
     suite: np.ndarray | None = None
@@ -142,17 +144,33 @@ def _flow_join(
     return flow_sel, qbar_sel, found, tuple(int(v) for v in flow.shape[1:])
 
 
+def apply_anchor(
+    a_all: np.ndarray, pred_all: np.ndarray, c_all: np.ndarray, layout: dict | None
+) -> tuple[np.ndarray, np.ndarray, dict | None]:
+    """Literal design form (adjudication 2026-10-19 §9, user-approved): R_A = A - pred_A0
+    and C_ext = C union pred_A0 (the frozen design requires the reference-policy prediction
+    inside the conditioning context for BOTH mu-hat_A and mu-hat_F)."""
+    if a_all.shape != pred_all.shape:
+        raise RuntimeError(f"pred_A0 shape {pred_all.shape} != A shape {a_all.shape} - shards are inconsistent")
+    r_a = a_all - pred_all
+    c_ext = np.concatenate([c_all, pred_all.astype(np.float32)], axis=1)
+    if layout is not None:
+        layout = {**layout, "pred_a0": [int(c_ext.shape[1] - pred_all.shape[1]), int(pred_all.shape[1])]}
+    return r_a, c_ext, layout
+
+
 def assemble_universe(manifest: dict, shards: dict[str, Path], args: argparse.Namespace) -> Universe:
     """Enumerate rows: stride subsample per episode, join the flow cache, filter NaN anchors."""
     uni = Universe()
     labels = label_lookup(manifest, args.holdout_size)
-    rows_a, rows_c = [], []
+    rows_a, rows_pred, rows_c = [], [], []
     per_dataset: dict[str, list[tuple[int, np.ndarray]]] = {}
     for shard_path in shards.values():
         try:
             with np.load(shard_path, allow_pickle=False) as z:
                 steps = np.asarray(z["steps"], dtype=np.int64)
                 a_arr = np.asarray(z["A"], dtype=np.float64)
+                pred_arr = np.asarray(z["pred_A0"], dtype=np.float64)
                 c_arr = np.asarray(z["C"], dtype=np.float32)
                 meta_json = str(z["meta_json"])
         except (KeyError, OSError, ValueError) as exc:
@@ -170,6 +188,7 @@ def assemble_universe(manifest: dict, shards: dict[str, Path], args: argparse.Na
         local = keep
         start = len(uni.episode_id)
         rows_a.append(a_arr[local])
+        rows_pred.append(pred_arr[local])
         rows_c.append(c_arr[local])
         suite = str(meta.get("suite", manifest["episodes"][episode_id].get("suite", "unknown")))
         task = str(meta.get("task_id", manifest["episodes"][episode_id].get("task", "unknown")))
@@ -185,8 +204,10 @@ def assemble_universe(manifest: dict, shards: dict[str, Path], args: argparse.Na
         per_dataset.setdefault(dataset_name, []).append((start, traj * KEY_STRIDE + steps[local].astype(np.int64)))
     if not rows_a:
         raise RuntimeError("universe is empty: no shard rows survived subsampling")
-    uni.r_a = np.concatenate(rows_a, axis=0)
-    uni.c = np.concatenate(rows_c, axis=0)
+    uni.a_raw = np.concatenate(rows_a, axis=0)
+    uni.r_a, uni.c, uni.c_layout = apply_anchor(
+        uni.a_raw, np.concatenate(rows_pred, axis=0), np.concatenate(rows_c, axis=0), uni.c_layout
+    )
     n_rows = uni.r_a.shape[0]
     if args.flow_root is None:
         raise RuntimeError("--flow-root is required: the gate statistics need the flow targets")
@@ -214,7 +235,7 @@ def assemble_universe(manifest: dict, shards: dict[str, Path], args: argparse.Na
         raise RuntimeError(f"inconsistent flow shapes across datasets: {shapes}")
     valid = stats.nan_anchor_mask(f_parts)  # protocol section 8: NaN anchor exclusion
     uni.nan_excluded = int((~valid).sum())
-    uni.excluded_action_stats = _action_stats(uni.r_a[~valid]) if uni.nan_excluded else None
+    uni.excluded_action_stats = _action_stats(uni.a_raw[~valid]) if uni.nan_excluded else None
     uni.f_raw = f_parts
     uni.qbar = q_parts
     _mask_universe(uni, valid)
@@ -240,6 +261,7 @@ def _row_dim_from_datasets(flow_root: str, dataset_names: list[str]) -> int:
 def _mask_universe(uni: Universe, valid: np.ndarray) -> None:
     uni.f_raw = uni.f_raw[valid]
     uni.qbar = uni.qbar[valid]
+    uni.a_raw = uni.a_raw[valid]
     uni.r_a = uni.r_a[valid]
     uni.c = uni.c[valid]
     keep = valid.tolist()
@@ -277,6 +299,7 @@ def build_pools(uni: Universe) -> dict[str, RowPool]:
         pool = RowPool(
             label=label,
             r_a=np.asarray(uni.r_a, dtype=np.float64)[mask],
+            a_raw=np.asarray(uni.a_raw, dtype=np.float64)[mask],
             c=c,
             episode_id=episode_id[mask],
             suite=suite[mask],
@@ -320,15 +343,28 @@ def fit_fold_model(pool: RowPool, fold: str, args: argparse.Namespace) -> FoldMo
     )
 
 
-def select_k_star(fold_models: dict[str, FoldModel]) -> tuple[int, float]:
-    """k* = argmax of the mean fold-OOF delta R2 curve (protocol section 8)."""
+def select_k_star(fold_models: dict[str, FoldModel], n_holdout_rows: int) -> tuple[int, float, dict]:
+    """k* = min k with mean fold-OOF delta R2(k) >= max - SE(MDE at argmax k).
+
+    v1.3 amendment (adjudication 2026-10-19 §5): v1.2 froze the k candidate set but left the
+    curve-to-k* rule as an unregistered argmax, which selects unstable modes on a plateau.
+    """
     curves = [m.oof_curve for m in fold_models.values()]
     common = sorted(set.intersection(*(set(c) for c in curves)))
     mean_curve = {k: float(np.mean([c[k] for c in curves])) for k in common}
     if not mean_curve:
         raise RuntimeError("no common k across folds")
-    k_star = max(mean_curve, key=mean_curve.get)
-    return int(k_star), float(mean_curve[k_star])
+    k_max = max(mean_curve, key=mean_curve.get)
+    thr = float(mean_curve[k_max] - stats.mde_standard_error(n_holdout_rows, int(k_max)))
+    plateau = {k: v for k, v in mean_curve.items() if v >= thr}
+    k_star = min(plateau)
+    info = {
+        "rule": "v1.3 plateau: min k within one SE(MDE) of the curve maximum",
+        "k_max": int(k_max),
+        "threshold": thr,
+        "plateau_ks": sorted(plateau),
+    }
+    return int(k_star), float(mean_curve[k_star]), info
 
 
 def holdout_fold_arrays(fold_models: dict[str, FoldModel], holdout: RowPool) -> list[tuple[np.ndarray, np.ndarray]]:
@@ -465,8 +501,11 @@ def run_stage_a(args: argparse.Namespace) -> dict:
     shards = discover_shards(args.residual_dir)
     uni = assemble_universe(manifest, shards, args)
     pools = build_pools(uni)
+    for pool in pools.values():
+        if pool.a_raw is None:
+            raise RuntimeError("universe is missing a_raw: anchor (R_A = A - pred_A0) was not applied")
     fold_models = {fold: fit_fold_model(pools[fold], fold, args) for fold in FOLD_LABELS}
-    k_star, fold_oof_star = select_k_star(fold_models)
+    k_star, fold_oof_star, k_star_rule = select_k_star(fold_models, pools["holdout"].n_rows)
     holdout = pools["holdout"]
     curve_h, a_tilde_h = holdout_delta_r2_curve(fold_models, holdout)
     delta_r2_star = curve_h[int(k_star)]
@@ -486,6 +525,7 @@ def run_stage_a(args: argparse.Namespace) -> dict:
         seed=args.seed,
     )
     probes = _predictability_probes(pools, uni, k_star, args)
+    positive_control = _positive_control(pools, uni, fold_models, k_star, args)
     angle_stats = _fold_principal_angles(fold_models, k_star)
     gates = stats.evaluate_gates(
         delta_r2_star=delta_r2_star,
@@ -496,8 +536,9 @@ def run_stage_a(args: argparse.Namespace) -> dict:
         median_principal_angle_deg=angle_stats["median_deg"],
     )
     results = {
-        "protocol": "rap_fsd/stage_a/v1.2",
+        "protocol": "rap_fsd/stage_a/v1.2.2",
         "config": _config_snapshot(args),
+        "k_star_rule": k_star_rule,
         "data": _data_report(manifest, uni, pools, args),
         "k_star": k_star,
         "fold_oof_curves": {f: {str(k): v for k, v in m.oof_curve.items()} for f, m in fold_models.items()},
@@ -519,6 +560,7 @@ def run_stage_a(args: argparse.Namespace) -> dict:
             "per_k_95": {str(k): float(np.percentile(v, 95)) for k, v in null["per_k"].items()},
         },
         "probes": probes,
+        "positive_control": positive_control,
         "fold_principal_angle": angle_stats,
         "controls": _controls(fold_models, pools, holdout, k_star, args, a_tilde_h),
         "sensitivity": _sensitivity(manifest, uni, args),
@@ -541,6 +583,10 @@ def _config_snapshot(args: argparse.Namespace) -> dict:
         "n_perms": args.n_perms,
         "n_bootstrap": args.n_bootstrap,
         "cca_lambda": args.cca_lambda,
+        "anchor": {
+            "form": "literal design: R_A = A - pred_A0; C_ext = C union pred_A0 for mu_A and mu_F",
+            "decision": "stage_a_optimistic_adjudication_20261019.md section 9, user-approved 2026-10-19",
+        },
         "cca_lambdas_sensitivity": list(args.cca_lambdas_sensitivity),
         "probe_lam": args.probe_lam,
         "rrr_lambda": args.rrr_lambda,
@@ -692,6 +738,40 @@ def _predictability_probes(pools: dict, uni: Universe, k_star: int, args: argpar
     }
 
 
+def _positive_control(
+    pools: dict, uni: Universe, fold_models: dict, k_star: int, args: argparse.Namespace
+) -> dict:
+    """Instrument certification for G3 (adjudication 2026-10-19 §4, informational only).
+
+    Asks whether the SAME probe features can read targets that are known to live in the
+    observation chain: (a) raw ground-truth actions A, (b) top-k* PCA of fold-averaged
+    OOF F_tilde (in-sample PCA, upper bound). No gate semantics - it separates
+    "probe instrument broken" from "z genuinely undecodable".
+    """
+    holdout = pools["holdout"]
+    evis = _load_holdout_evis(pools, args)
+    x = evis["linear"] if evis is not None else holdout.probe_x.astype(np.float64)
+    rng = np.random.default_rng(args.seed + 7)
+    perm = rng.permutation(x.shape[0])
+    n_train = int(0.8 * x.shape[0])
+    tr, ev = perm[:n_train], perm[n_train:]
+    ctrl_a = stats.linear_probe_r2(x[tr], holdout.a_raw[tr], x[ev], holdout.a_raw[ev], seed=args.seed)
+    f_t_avg = _holdout_f_tilde_avg(fold_models, holdout)
+    f_c = f_t_avg - f_t_avg.mean(axis=0, keepdims=True)
+    u, s, _ = np.linalg.svd(f_c, full_matrices=False)
+    pc_t = u[:, :k_star] * s[:k_star]
+    ctrl_b = stats.linear_probe_r2(x[tr], pc_t[tr], x[ev], pc_t[ev], seed=args.seed)
+    return {
+        "target_a": "raw ground-truth actions A (56 dims, pre-anchor)",
+        "target_b": f"top-{k_star} PCA of fold-averaged OOF F_tilde (in-sample PCA, upper bound)",
+        "control_a_r2": ctrl_a["r2"],
+        "control_b_r2": ctrl_b["r2"],
+        "features": "token-level E_vis (linear tier)" if evis is not None else "pooled E_vis fallback",
+        "instrument_certified": bool(ctrl_a["r2"] > 0.05),
+        "note": "informational only - certifies the probe instrument, no gate semantics",
+    }
+
+
 def _full_data_projection(pools: dict, args: argparse.Namespace) -> dict:
     """Single full-data projection (audit H5): mu-hat_A / mu-hat_F / CCA fitted once on all rows."""
     c_all = np.concatenate([pools[f].c for f in (*FOLD_LABELS, "holdout")], axis=0)
@@ -814,7 +894,7 @@ def _qbar_sensitivity(uni: Universe, args: argparse.Namespace) -> dict:
     q_uni = _copy_universe_masked(uni, mask)
     q_pools = build_pools(q_uni)
     q_folds = {f: fit_fold_model(q_pools[f], f, args) for f in FOLD_LABELS}
-    k_star_q, _ = select_k_star(q_folds)
+    k_star_q, _, _ = select_k_star(q_folds, q_pools["holdout"].n_rows)
     curve_q, a_tilde_q = holdout_delta_r2_curve(q_folds, q_pools["holdout"])
     pred_q = _holdout_avg_predictions(q_folds, q_pools["holdout"], k_star_q)
     boot_q = stats.block_bootstrap_delta_r2(
@@ -839,6 +919,7 @@ def _copy_universe_masked(uni: Universe, mask: np.ndarray) -> Universe:
         step=[s for s, v in zip(uni.step, mask.tolist(), strict=True) if v],
         label=[lab for lab, v in zip(uni.label, mask.tolist(), strict=True) if v],
         f_raw=uni.f_raw[mask] if uni.f_raw is not None else None,
+        a_raw=uni.a_raw[mask] if uni.a_raw is not None else None,
         r_a=uni.r_a[mask],
         c=uni.c[mask],
         qbar=uni.qbar[mask],
@@ -865,7 +946,7 @@ def _holdout_size_sensitivity(manifest: dict, uni: Universe, args: argparse.Name
         s_uni.label = row_labels
         s_pools = build_pools(s_uni)
         s_folds = {f: fit_fold_model(s_pools[f], f, args) for f in FOLD_LABELS}
-        k_star_s, _ = select_k_star(s_folds)
+        k_star_s, _, _ = select_k_star(s_folds, s_pools["holdout"].n_rows)
         curve_s, a_tilde_s = holdout_delta_r2_curve(s_folds, s_pools["holdout"])
         pred_s = _holdout_avg_predictions(s_folds, s_pools["holdout"], k_star_s)
         boot_s = stats.block_bootstrap_delta_r2(
@@ -1051,7 +1132,13 @@ def _verdict(gates: dict, k_star: int) -> dict:
 
 def render_report(results: dict) -> str:
     """Markdown report with the go/no-go decision, gates, curves and attributions."""
-    lines = ["# RAP-FSD Stage A report", "", "Protocol: pre-registered v1.2 (2026-10-18, frozen thresholds).", ""]
+    lines = [
+        "# RAP-FSD Stage A report",
+        "",
+        "Protocol: pre-registered v1.2 + v1.2.2 anchor fix (R_A = A - pred_A0, C_ext = C union pred_A0)"
+        " + v1.3 plateau k* rule; provenance in results.json.",
+        "",
+    ]
     v = results["verdict"]
     lines.append(f"## Verdict: **{v['decision']}** (k* = {v['k_star']})")
     lines.append("")
@@ -1105,6 +1192,13 @@ def render_report(results: dict) -> str:
         "- note: z targets come from the single full-data projection (audit H5), fitted on all rows "
         "including the holdout - G3 carries a mild in-sample optimism in the projection direction"
     )
+    lines.append("")
+    lines.append("## Positive controls (instrument certification, informational)")
+    lines.append("")
+    pc = results["positive_control"]
+    lines.append(f"- E_vis -> raw actions A: R2 = {pc['control_a_r2']:.4f}")
+    lines.append(f"- E_vis -> top-k* PCA of F_tilde: R2 = {pc['control_b_r2']:.4f}")
+    lines.append(f"- features: {pc['features']}; instrument_certified = {pc['instrument_certified']}")
     lines.append("")
     lines.append("## Data / NaN anchors")
     lines.append("")
