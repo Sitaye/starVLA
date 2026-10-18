@@ -520,7 +520,7 @@ def run_stage_a(args: argparse.Namespace) -> dict:
         },
         "probes": probes,
         "fold_principal_angle": angle_stats,
-        "controls": _controls(fold_models, pools, holdout, k_star, args),
+        "controls": _controls(fold_models, pools, holdout, k_star, args, a_tilde_h),
         "sensitivity": _sensitivity(manifest, uni, args),
         "cca_lambda_sensitivity": _cca_lambda_sensitivity(fold_models, holdout, k_star, args),
         "per_suite_breakdown": per_suite_breakdown(pools, fold_models, holdout, k_star, args),
@@ -713,60 +713,71 @@ def _fold_principal_angles(fold_models: dict, k_star: int) -> dict:
     return {"median_deg": float(np.median(angles)), "all_deg": angles.tolist(), "k_star": int(k_star)}
 
 
-def _controls(fold_models: dict, pools: dict, holdout: RowPool, k_star: int, args: argparse.Namespace) -> dict:
-    """RRR / Random-subspace / reversed-time controls (protocol section 8 controls)."""
+def _controls(
+    fold_models: dict,
+    pools: dict,
+    holdout: RowPool,
+    k_star: int,
+    args: argparse.Namespace,
+    a_tilde_avg: np.ndarray,
+) -> dict:
+    """RRR / Random-subspace / reversed-time controls (protocol section 8 controls).
+
+    a_tilde_avg is the main arm's fold-averaged holdout residual target (identical for
+    every control arm: reversal/random-basis touch only the flow side, never mu_A/A)."""
     return {
-        "rrr": {"delta_r2_k_star": _rrr_holdout_delta_r2(fold_models, holdout, k_star)},
-        "random_subspace": {"delta_r2_k_star": _random_subspace_delta_r2(fold_models, holdout, k_star, args)},
-        "reversed_time": {"delta_r2_k_star": _reversed_time_delta_r2(fold_models, pools, holdout, k_star, args)},
+        "rrr": {"delta_r2_k_star": _rrr_holdout_delta_r2(fold_models, holdout, k_star, a_tilde_avg)},
+        "random_subspace": {
+            "delta_r2_k_star": _random_subspace_delta_r2(fold_models, holdout, k_star, args, a_tilde_avg)
+        },
+        "reversed_time": {
+            "delta_r2_k_star": _reversed_time_delta_r2(
+                fold_models, pools, holdout, k_star, args, a_tilde_avg
+            )
+        },
         "note": "rank ladder / basis fitted per fold; holdout evaluation, fold-averaged predictions",
     }
 
 
-def _rrr_holdout_delta_r2(fold_models: dict, holdout: RowPool, k_star: int) -> float:
+def _rrr_holdout_delta_r2(
+    fold_models: dict, holdout: RowPool, k_star: int, a_tilde_avg: np.ndarray
+) -> float:
     """RRR rank-k* predictor fitted per fold, evaluated on holdout rows, fold-averaged."""
-    preds, a_tilde_avg = [], None
+    preds = []
     for fold in FOLD_LABELS:
         m = fold_models[fold]
-        a_tilde = holdout.r_a - m.mu_a.predict(holdout.c)
         f_tilde = holdout.f - m.mu_f.predict(holdout.c)
-        if a_tilde_avg is None:
-            a_tilde_avg = a_tilde
-        else:
-            a_tilde_avg = a_tilde_avg + a_tilde
         k_eff = min(k_star, int(m.rrr["s"].shape[0]))
         w_k = m.rrr["u"][:, :k_eff] @ np.diag(m.rrr["s"][:k_eff]) @ m.rrr["vt"][:k_eff]
         preds.append(f_tilde @ w_k)
-    return stats.r2_explained(a_tilde_avg / len(FOLD_LABELS), np.mean(preds, axis=0))
+    return stats.r2_explained(a_tilde_avg, np.mean(preds, axis=0))
 
 
 def _random_subspace_delta_r2(
-    fold_models: dict, holdout: RowPool, k_star: int, args: argparse.Namespace
+    fold_models: dict, holdout: RowPool, k_star: int, args: argparse.Namespace, a_tilde_avg: np.ndarray
 ) -> float:
     """Random-subspace control: random orthonormal flow basis of the same dim (audit section 3)."""
-    preds, a_tildes = [], []
+    preds = []
     for i, fold in enumerate(FOLD_LABELS):
         m = fold_models[fold]
-        a_tilde = holdout.r_a - m.mu_a.predict(holdout.c)
         f_tilde = holdout.f - m.mu_f.predict(holdout.c)
-        a_tildes.append(a_tilde)
         basis = stats.random_orthogonal_basis(m.cca.mean_f.shape[0], k_star, seed=args.seed + 100 + i)
         z_rand_fold = (m.f_tilde - m.cca.mean_f) / m.cca.std_f @ basis
         coef = stats.fit_linear_probe(z_rand_fold, m.a_tilde, lam=args.probe_lam)
         z_rand_h = (f_tilde - m.cca.mean_f) / m.cca.std_f @ basis
         preds.append(z_rand_h @ coef)
-    return stats.r2_explained(np.mean(a_tildes, axis=0), np.mean(preds, axis=0))
+    return stats.r2_explained(a_tilde_avg, np.mean(preds, axis=0))
 
 
 def _reversed_time_delta_r2(
-    fold_models: dict, pools: dict, holdout: RowPool, k_star: int, args: argparse.Namespace
+    fold_models: dict, pools: dict, holdout: RowPool, k_star: int, args: argparse.Namespace, a_tilde_avg: np.ndarray
 ) -> float:
     """Reversed-time control: the FULL pipeline is refit on flow rows reversed within each
     episode (step t's flow paired with step T-t's action; C / A_tilde keep their original
     order) - mu-hat_F + CCA + linear probe are all refit on the reversed arm, then
     evaluated on the reversed holdout residuals, fold-averaged. A sign flip alone would
     be an identity control (CCA loadings are sign-invariant, the probe absorbs the sign)."""
-    preds, a_tildes = [], []
+    preds = []
     f_h_rev = stats.reversed_time_flow(holdout.f, holdout.episode_id)
     for fold in FOLD_LABELS:
         pool = pools[fold]
@@ -774,14 +785,13 @@ def _reversed_time_delta_r2(
         f_rev = stats.reversed_time_flow(pool.f, pool.episode_id)
         mu_f_rev = stats.fit_conditional_mean(pool.c, f_rev, seed=args.seed)
         f_tilde_rev = stats.residualize(f_rev, pool.c, mu_f_rev)
-        a_tildes.append(m.a_tilde)
         cca_rev = stats.fit_cca(f_tilde_rev, m.a_tilde, ridge_lambda=args.cca_lambda)
         z_rev_fold = cca_rev.project(f_tilde_rev, k_star)
         coef = stats.fit_linear_probe(z_rev_fold, m.a_tilde, lam=args.probe_lam)
         f_tilde_h_rev = f_h_rev - mu_f_rev.predict(holdout.c)
         z_rev_h = cca_rev.project(f_tilde_h_rev, k_star)
         preds.append(z_rev_h @ coef)
-    return stats.r2_explained(np.mean(a_tildes, axis=0), np.mean(preds, axis=0))
+    return stats.r2_explained(a_tilde_avg, np.mean(preds, axis=0))
 
 
 def _sensitivity(manifest: dict, uni: Universe, args: argparse.Namespace) -> dict:

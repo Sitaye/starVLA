@@ -306,3 +306,55 @@ def test_evaluate_gates_thresholds():
     assert all(all_pass[k] for k in ("G1_existence", "G2_increment", "G3_predictability", "G4_fold_consistency"))
     all_fail = gates(null_95, 0.0, 0.4999, 45.0)
     assert not any(all_fail[k] for k in ("G1_existence", "G2_increment", "G3_predictability", "G4_fold_consistency"))
+
+
+# ---------------------------------------------------------------------------
+# 7. Controls accept folds of unequal length (regression: cluster crash at
+#    np.mean over per-fold pool residuals of shape (n_foldA,) vs (n_foldB,))
+# ---------------------------------------------------------------------------
+def test_controls_unequal_fold_lengths():
+    from types import SimpleNamespace
+
+    from starVLA.analysis.rap_fsd import run_stage_a as rsa
+
+    rng = np.random.default_rng(0)
+    d_f, d_c, d_a, k_star = 6, 4, 2, 2
+    args = SimpleNamespace(seed=0, cca_lambda=0.1, probe_lam=0.1)
+
+    def make_pool(label: str, n: int, n_ep: int):
+        c = rng.normal(size=(n, d_c))
+        f = rng.normal(size=(n, d_f))
+        r_a = rng.normal(size=(n, d_a))
+        ep = rng.integers(0, n_ep, size=n)
+        return rsa.RowPool(label=label, f=f, r_a=r_a, c=c, episode_id=ep)
+
+    pools = {
+        lab: make_pool(lab, n, 3) for lab, n in zip(rsa.FOLD_LABELS, (40, 33), strict=True)
+    }
+    holdout = make_pool("holdout", 25, 3)
+    mu_a_pool = stats.fit_conditional_mean(pools["fold_0"].c, pools["fold_0"].r_a, seed=0)
+
+    fold_models = {}
+    for i, (lab, pool) in enumerate(pools.items()):
+        mu_f = stats.fit_conditional_mean(pool.c, pool.f, seed=i)
+        f_tilde = stats.residualize(pool.f, pool.c, mu_f)
+        a_tilde = stats.residualize(pool.r_a, pool.c, mu_a_pool)
+        q, _ = np.linalg.qr(rng.normal(size=(d_f, k_star + 1)))
+        fold_models[lab] = SimpleNamespace(
+            mu_f=mu_f,
+            a_tilde=a_tilde,
+            f_tilde=f_tilde,
+            cca=stats.fit_cca(f_tilde, a_tilde, ridge_lambda=args.cca_lambda),
+            rrr={
+                "u": q,
+                "s": np.abs(rng.normal(size=k_star + 1)),
+                "vt": np.linalg.qr(rng.normal(size=(k_star + 1, d_a)))[0],
+            },
+        )
+
+    mu_a_h = stats.fit_conditional_mean(holdout.c, holdout.r_a, seed=0)
+    a_tilde_avg = holdout.r_a - mu_a_h.predict(holdout.c)
+
+    result = rsa._controls(fold_models, pools, holdout, k_star, args, a_tilde_avg)
+    for arm in ("rrr", "random_subspace", "reversed_time"):
+        assert np.isfinite(result[arm]["delta_r2_k_star"]), arm
