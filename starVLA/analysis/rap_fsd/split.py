@@ -270,7 +270,15 @@ def load_manifest(path: str | Path) -> dict:
 def label_lookup(manifest: dict, holdout_size: int | None = None) -> dict[str, str]:
     """episode_id -> fold/holdout label at the requested holdout size (default primary)."""
     size = int(holdout_size if holdout_size is not None else manifest["primary_holdout_size"])
-    return {episode_id: record["labels"][str(size)] for episode_id, record in manifest["episodes"].items()}
+    key = str(size)
+    sample = next(iter(manifest["episodes"].values()), None)
+    if sample is not None and key not in sample["labels"]:
+        raise ValueError(
+            f"holdout size {size} not recorded in manifest "
+            f"(tiers: {sorted(manifest.get('holdout_sizes', []))}, "
+            f"primary: {manifest.get('primary_holdout_size')})"
+        )
+    return {episode_id: record["labels"][key] for episode_id, record in manifest["episodes"].items()}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -35,7 +35,6 @@ FOLD_LABELS = ("fold_0", "fold_1")
 # action layout of libero_franka policies: 8x7 delta qpos normalized (pi0 style)
 ACTION_DIM = 56
 STRIDE_DEFAULT = 8
-HOLDOUT_SIZE_PRIMARY = 2500
 KEY_STRIDE = 100_000  # episode key convention: trajectory_id*100_000 + step
 
 
@@ -368,7 +367,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--residual-dir", required=True, help="directory of export_pi0.py episode npz shards")
     parser.add_argument("--flow-root", default=None, help="RAFT flow cache root (per-dataset subdirs)")
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--holdout-size", type=int, default=HOLDOUT_SIZE_PRIMARY)
+    parser.add_argument(
+        "--holdout-size", type=int, default=None,
+        help="primary holdout tier to read gates at; default = manifest's primary_holdout_size "
+        "(protocol v1.2 amendment v1.2.1 rescales tiers to the actual dataset, e.g. 300/400/500)",
+    )
     parser.add_argument("--stride", type=int, default=STRIDE_DEFAULT)
     parser.add_argument("--k-candidates", default="4,8,16,32")
     parser.add_argument("--n-perms", type=int, default=stats.N_PERMS_MIN)
@@ -452,6 +455,13 @@ def main() -> None:
 def run_stage_a(args: argparse.Namespace) -> dict:
     """Execute the full frozen protocol; returns the results.json payload."""
     manifest = load_manifest(args.manifest)
+    if args.holdout_size is None:
+        args.holdout_size = int(manifest["primary_holdout_size"])
+    if args.holdout_size not in manifest["holdout_sizes"]:
+        raise SystemExit(
+            f"--holdout-size {args.holdout_size} not recorded in manifest "
+            f"(tiers: {manifest['holdout_sizes']}, primary: {manifest['primary_holdout_size']})"
+        )
     shards = discover_shards(args.residual_dir)
     uni = assemble_universe(manifest, shards, args)
     pools = build_pools(uni)
@@ -831,10 +841,12 @@ def _holdout_size_sensitivity(manifest: dict, uni: Universe, args: argparse.Name
     even, so the sorted-rank parity rule in split.py is size-invariant); only the holdout
     row set changes (nested 2000 subset 2500 subset 3000). G1 permutation null is a
     PRIMARY-holdout gate only - sensitivity tiers report delta R2 + bootstrap CI."""
-    # tiers actually present in the manifest: {2000, primary, 3000} intersected with the
-    # manifest's own holdout tiers (the sensitivity tiers come from the split manifest)
+    # tiers actually present in the manifest: every non-primary tier is a sensitivity
+    # read (nested subsets recorded by split.py; e.g. amendment v1.2.1: 300/500 around
+    # primary 400). G1 permutation null is a PRIMARY-holdout gate only - sensitivity
+    # tiers report delta R2 + bootstrap CI.
     available = set(manifest.get("holdout_sizes", []))
-    sizes = sorted(s for s in {2000, args.holdout_size, 3000} if s in available)
+    sizes = sorted(s for s in available if s != args.holdout_size)
     out = []
     for size in sizes:
         labels = label_lookup(manifest, size)
