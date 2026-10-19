@@ -99,7 +99,7 @@ def verify_determinism(args):
                 suite.proprio(row["episode_index"])[0],
                 suite.frame_rgb(row["episode_index"]),
             )
-            entry["init_match"] = {k: match[k] for k in ("init", "arm_err", "img_err")}
+            entry["init_match"] = {k: match[k] for k in ("init", "pos_err", "rot_err", "img_err")}
             report["all_init_ok"] &= True
         except ValueError as e:
             entry["init_match"] = {"error": str(e)}
@@ -108,12 +108,17 @@ def verify_determinism(args):
             env.close()
             continue
 
+        rec = suite.proprio(row["episode_index"])
+        f0 = branch._env_proprio(env.set_init_state(np.asarray(init_states[match["init"]], dtype=float).flatten()))
         snap1 = branch.replay_to(env, init_states[match["init"]], actions, t0)
         snap2 = branch.replay_to(env, init_states[match["init"]], actions, t0)
         entry["replay_err"] = float(np.max(np.abs(snap1 - snap2)))
-        entry["replay_fidelity"] = float(
-            np.linalg.norm(branch._env_proprio(descriptor.env_obs(env)) - suite.proprio(row["episode_index"])[t0][:6])
-        )
+        prop_t0 = branch._env_proprio(descriptor.env_obs(env))
+        # Fidelity excess over the frame-0 residual (constant offsets cancel).
+        entry["replay_excess"] = {
+            "pos": float(np.linalg.norm((prop_t0[:3] - rec[t0][:3]) - (f0[:3] - rec[0][:3]))),
+            "rot": float(np.linalg.norm((prop_t0[3:6] - rec[t0][3:6]) - (f0[3:6] - rec[0][3:6]))),
+        }
         out = state_hook.verify_determinism(env, snap1, list(chunk), extract, n_reps=DETERMINISM_REPS)
         entry["roundtrip_err"] = out["roundtrip_err"]
         entry["rollout_spread"] = out["rollout_spread"]
@@ -122,7 +127,10 @@ def verify_determinism(args):
         report["all_replay_ok"] &= entry["replay_err"] <= state_hook.SPIKE_SPREAD_TOL
         report["all_roundtrip_ok"] &= entry["roundtrip_err"] <= state_hook.ROUNDTRIP_TOL
         report["all_rollouts_ok"] &= entry["rollout_spread"] <= state_hook.SPIKE_SPREAD_TOL
-        report["all_fidelity_ok"] &= entry["replay_fidelity"] <= branch.REPLAY_FIDELITY_TOL
+        report["all_fidelity_ok"] &= (
+            entry["replay_excess"]["pos"] <= branch.REPLAY_FIDELITY_TOL
+            and entry["replay_excess"]["rot"] <= branch.REPLAY_FIDELITY_TOL
+        )
         env.close()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

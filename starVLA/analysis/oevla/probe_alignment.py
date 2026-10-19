@@ -47,7 +47,6 @@ def _probe_suite(suite_name, dataset_dir, out_dir, n_candidates):
         n: np.asarray(env.sim.data.body_xpos[env.sim.model.body_name2id(n)]).tolist()
         for n in _base_candidates(env)
     }
-    base_pos = np.asarray(next(iter(base_bodies.values()))) if base_bodies else np.zeros(3)
     candidates = []
     for j, init in enumerate(init_states[:n_candidates]):
         obs = env.set_init_state(np.asarray(init, dtype=float).flatten())
@@ -58,8 +57,7 @@ def _probe_suite(suite_name, dataset_dir, out_dir, n_candidates):
             {
                 "init": j,
                 "env_proprio": prop.tolist(),
-                "abs_err": float(np.linalg.norm(prop - state[0][:6])),
-                "rel_err": float(np.linalg.norm((prop[:3] - base_pos) - state[0][:3])),
+                "pos_err": float(np.linalg.norm(prop[:3] - state[0][:3])),
                 "rot_err": float(np.linalg.norm(prop[3:6] - state[0][3:6])),
                 "img_err": float(np.mean(np.abs(img.astype(np.float32) - target.astype(np.float32)))),
             }
@@ -75,23 +73,29 @@ def _probe_suite(suite_name, dataset_dir, out_dir, n_candidates):
         "recorded_state_mid": state[min(9, len(state) - 1)].tolist(),
         "action_first": actions[0].tolist(),
         "action_absmax_mean": float(np.mean(np.abs(actions))),
-        "best_abs": min(candidates, key=lambda c: c["abs_err"]),
-        "best_rel": min(candidates, key=lambda c: c["rel_err"]),
+        "best_pos": min(candidates, key=lambda c: c["pos_err"]),
         "best_rot": min(candidates, key=lambda c: c["rot_err"]),
         "best_img": min(candidates, key=lambda c: c["img_err"]),
     }
-    best = report["best_rel"]
-    branch.replay_to(env, init_states[best["init"]], actions, t0=branch.CHUNK_H + 1)
-    prop = branch._env_proprio(descriptor.env_obs(env))
-    report["replay_from_best_rel"] = {
-        "init": best["init"],
-        "drift_abs": float(np.linalg.norm(prop - state[branch.CHUNK_H + 1][:6])),
-        "drift_rel": float(np.linalg.norm((prop[:3] - base_pos) - state[branch.CHUNK_H + 1][:3])),
-    }
+    best = report["best_img"]
+    obs = env.set_init_state(np.asarray(init_states[best["init"]], dtype=float).flatten())
+    f0 = branch._env_proprio(obs)
     from PIL import Image
 
-    pair = np.concatenate([np.asarray(suite.frame_rgb(ep)), branch._env_image(descriptor.env_obs(env))], axis=1)
+    pair = np.concatenate([np.asarray(suite.frame_rgb(ep)), branch._env_image(obs)], axis=1)
     Image.fromarray(pair).save(out_dir / f"{suite_name}.png")
+    branch.replay_to(env, init_states[best["init"]], actions, t0=branch.CHUNK_H + 1)
+    prop = branch._env_proprio(descriptor.env_obs(env))
+    # Fidelity excess over the frame-0 residual (constant offsets cancel).
+    report["replay_from_best_img"] = {
+        "init": best["init"],
+        "excess_pos": float(
+            np.linalg.norm((prop[:3] - state[branch.CHUNK_H + 1][:3]) - (f0[:3] - state[0][:3]))
+        ),
+        "excess_rot": float(
+            np.linalg.norm((prop[3:6] - state[branch.CHUNK_H + 1][3:6]) - (f0[3:6] - state[0][3:6]))
+        ),
+    }
     env.close()
     return report
 

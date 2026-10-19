@@ -123,13 +123,26 @@ def env_obs(env):
     raise AttributeError(f"no observation accessor on {type(env).__name__}")
 
 
+def eef_quat(obs):
+    """robot0_eef_quat normalized to (w, x, y, z).
+
+    robosuite observation quats are (x, y, z, w); MuJoCo sim quats
+    (body_xquat) are (w, x, y, z). Probe round 1 pinned this: reading obs
+    slots as (w, x, y, z) turns the gripper-down home pose into
+    near-identity; as (x, y, z, w) it is a pi rotation about +x, matching
+    the recorded proprio to ~0.15 rad.
+    """
+    q = np.asarray(obs["robot0_eef_quat"], dtype=float)
+    return np.array([q[3], q[0], q[1], q[2]])
+
+
 def snapshot_features(env, layout):
     """Read eef pose, object poses and gripper width from a LIBERO env."""
     obs = env_obs(env)
     eef_pos = np.asarray(obs["robot0_eef_pos"], dtype=float)
-    eef_quat = np.asarray(obs["robot0_eef_quat"], dtype=float)
+    quat = eef_quat(obs)
     ids = env.sim.model.body_name2id
-    feats = [eef_pos, quat2axisangle(eef_quat)]
+    feats = [eef_pos, quat2axisangle(quat)]
     objects = {}
     for name in layout["object_names"]:
         i = ids(name)
@@ -139,7 +152,7 @@ def snapshot_features(env, layout):
         feats += [pos, quat2axisangle(quat), pos - eef_pos]
     gripper = float(np.mean(np.asarray(obs["robot0_gripper_qpos"], dtype=float)))
     feats.append(np.array([gripper]))
-    return np.concatenate(feats), objects, eef_pos, eef_quat, gripper
+    return np.concatenate(feats), objects, eef_pos, quat, gripper
 
 
 def grasp_object(objects, eef_pos, gripper_width):

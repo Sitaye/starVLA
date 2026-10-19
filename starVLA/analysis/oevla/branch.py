@@ -113,38 +113,55 @@ def _get_env(dataset_dir, task, camera):
 
 def _env_proprio(obs):
     pos = np.asarray(obs["robot0_eef_pos"], dtype=float)
-    rot = descriptor.quat2axisangle(np.asarray(obs["robot0_eef_quat"], dtype=float))
+    rot = descriptor.quat2axisangle(descriptor.eef_quat(obs))
     return np.concatenate([pos, rot])
 
 
 def _env_image(obs):
+    """Agentview-style camera frame, rotated 180 deg to the recorded convention.
+
+    The no_noops regeneration rendered upside-down and saved the compensated
+    frames (probe round 1: recorded vs rendered pairs are inverted), so the
+    rendered frame is rotated 180 deg before any comparison with recorded data.
+    """
     keys = [k for k in obs if k.endswith("_image") and "eye_in_hand" not in k]
     if not keys:
         raise ValueError(f"no agentview-style camera in obs: {sorted(obs)[:6]}")
-    return np.asarray(obs[keys[0]])
+    return np.asarray(obs[keys[0]])[::-1, ::-1].copy()
 
 
 def match_init_state(env, init_states, target_proprio, target_img):
-    """Identify which benchmark init state generated the episode: argmin over
-    frame-0 eef proprio (pos + 0.25*rot), tie-break/validate by camera L1.
-    Raises when no candidate satisfies both pre-registered tolerances."""
+    """Identify which benchmark init state generated the episode.
+
+    Arm proprio is nearly constant across candidates (every reset homes the
+    arm), so selection is image-primary (object layout differs per candidate);
+    pos/rot residuals are sanity gates on the frame-0 offset. Raises when no
+    candidate satisfies all three pre-registered tolerances."""
     env.reset()
     candidates = []
     for j, init in enumerate(init_states):
         obs = env.set_init_state(np.asarray(init, dtype=float).flatten())
-        arm_err = float(np.linalg.norm(_env_proprio(obs) - target_proprio[:6]))
+        prop = _env_proprio(obs)
         img = _env_image(obs)
         diff = min(
             float(np.mean(np.abs(img.astype(np.float32) - target_img.astype(np.float32)))),
             float(np.mean(np.abs(img.astype(np.float32)[..., ::-1] - target_img.astype(np.float32)))),
         )
-        candidates.append({"init": j, "arm_err": arm_err, "img_err": diff, "score": arm_err + diff})
-    candidates.sort(key=lambda c: (c["arm_err"], c["img_err"]))
+        candidates.append(
+            {
+                "init": j,
+                "pos_err": float(np.linalg.norm(prop[:3] - target_proprio[:3])),
+                "rot_err": float(np.linalg.norm(prop[3:6] - target_proprio[3:6])),
+                "img_err": diff,
+            }
+        )
+    candidates.sort(key=lambda c: (c["img_err"], c["pos_err"]))
     for c in candidates:
-        if c["arm_err"] < INIT_POS_TOL and c["img_err"] < INIT_IMG_TOL:
+        if c["pos_err"] < INIT_POS_TOL and c["rot_err"] < INIT_ROT_TOL and c["img_err"] < INIT_IMG_TOL:
             return c
     top = ", ".join(
-        f"init{c['init']}(arm={c['arm_err']:.3f},img={c['img_err']:.1f})" for c in candidates[:3]
+        f"init{c['init']}(pos={c['pos_err']:.3f},rot={c['rot_err']:.3f},img={c['img_err']:.1f})"
+        for c in candidates[:3]
     )
     raise ValueError(f"no init state matches recorded frame 0 ({top})")
 
@@ -294,10 +311,16 @@ def state_branches(dataset_dir, entry, delta_bar, seed, camera=None):
         target_img = suite.frame_rgb(entry["episode_index"])
         _MATCH_CACHE[match_key] = match_init_state(env, init_states, target, target_img)
     match = _MATCH_CACHE[match_key]
+    rec = suite.proprio(entry["episode_index"])
+    f0 = _env_proprio(env.set_init_state(np.asarray(init_states[match["init"]], dtype=float).flatten()))
     state = replay_to(env, init_states[match["init"]], actions, entry["t0"])
-    replay_drift = float(
-        np.linalg.norm(_env_proprio(descriptor.env_obs(env)) - suite.proprio(entry["episode_index"])[entry["t0"]][:6])
-    )
+    prop_t0 = _env_proprio(descriptor.env_obs(env))
+    # Fidelity excess over the frame-0 residual: the constant convention/pose
+    # offset cancels, only genuine replay divergence survives.
+    replay_excess = {
+        "pos": float(np.linalg.norm((prop_t0[:3] - rec[entry["t0"]][:3]) - (f0[:3] - rec[0][:3]))),
+        "rot": float(np.linalg.norm((prop_t0[3:6] - rec[entry["t0"]][3:6]) - (f0[3:6] - rec[0][3:6]))),
+    }
 
     base = run_branch(env, state, state_seed, chunk, post, layout)
     records = [
@@ -311,9 +334,10 @@ def state_branches(dataset_dir, entry, delta_bar, seed, camera=None):
             "object_names": object_names if r == 0 else None,
             "object_source": object_source if r == 0 else None,
             "init_index": match["init"] if r == 0 else None,
-            "init_arm_err": match["arm_err"] if r == 0 else None,
+            "init_pos_err": match["pos_err"] if r == 0 else None,
+            "init_rot_err": match["rot_err"] if r == 0 else None,
             "init_img_err": match["img_err"] if r == 0 else None,
-            "replay_drift": replay_drift if r == 0 else None,
+            "replay_excess": replay_excess if r == 0 else None,
             "success": base["success"],
             "done": base["done"],
             "n_steps": base["n_steps"],

@@ -99,6 +99,70 @@ def test_quat_roundtrip_and_rotate():
     assert np.allclose(descriptor.quat_rotate(qz, v), [0.0, 1.0, 0.0], atol=1e-9)
 
 
+def test_obs_quat_is_xyzw():
+    # Cluster probe round 1 regression: robosuite obs quats are (x, y, z, w).
+    # These slots are the gripper-down home pose of libero_spatial ep372; read
+    # as (w, x, y, z) they produce an absurd near-identity rotation.
+    q = np.array([0.99870986, 0.04726228, -0.01817629, 0.00380947])
+    aa = descriptor.quat2axisangle(descriptor.eef_quat({"robot0_eef_quat": q}))
+    assert np.allclose(aa, [3.12995315, 0.14811983, -0.05696444], atol=1e-6)
+    assert np.linalg.norm(aa) > 3.0
+
+
+def test_env_image_rot180():
+    img = np.arange(16, dtype=np.uint8).reshape(4, 4)[..., None].repeat(3, -1)
+    out = branch_mod._env_image({"agentview_image": img})
+    assert np.array_equal(out, img[::-1, ::-1])
+
+
+class _FakeMatchEnv:
+    """set_init_state returns the pre-built obs for each candidate in order."""
+
+    def __init__(self, obs_list):
+        self._obs_list = obs_list
+        self._i = -1
+
+    def reset(self):
+        self._i = -1
+
+    def set_init_state(self, _flat):
+        self._i += 1
+        return self._obs_list[self._i]
+
+
+def test_match_init_state_img_primary():
+    rng = np.random.default_rng(7)
+    target_img = rng.integers(0, 255, (8, 8, 3), dtype=np.uint8)
+    identity_xyzw = np.array([0.0, 0.0, 0.0, 1.0])  # (x, y, z, w)
+    target_proprio = np.zeros(6)
+
+    def obs(img):
+        # obs images are pre-flip: _env_image rotates 180 deg to compare.
+        return {"robot0_eef_pos": np.zeros(3), "robot0_eef_quat": identity_xyzw, "agentview_image": img[::-1, ::-1]}
+
+    off = target_img.copy()
+    off[0, 0] += 40
+    env = _FakeMatchEnv([obs(off), obs(target_img), obs(off)])
+    match = branch_mod.match_init_state(env, [np.zeros(1)] * 3, target_proprio, target_img)
+    assert match["init"] == 1
+    assert match["img_err"] == pytest.approx(0.0, abs=1e-6)
+    assert match["pos_err"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_match_init_state_rot_gate_rejects():
+    rng = np.random.default_rng(8)
+    target_img = rng.integers(0, 255, (8, 8, 3), dtype=np.uint8)
+    target_proprio = np.concatenate([np.zeros(3), [0.3, 0.0, 0.0]])  # recorded rot off home
+    obs = {
+        "robot0_eef_pos": np.zeros(3),
+        "robot0_eef_quat": np.array([0.0, 0.0, 0.0, 1.0]),
+        "agentview_image": target_img[::-1, ::-1],
+    }
+    env = _FakeMatchEnv([obs])
+    with pytest.raises(ValueError, match="no init state matches"):
+        branch_mod.match_init_state(env, [np.zeros(1)], target_proprio, target_img)
+
+
 def _static_snapshot(grasp_name=None):
     rng = np.random.default_rng(2)
     return {
