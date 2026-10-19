@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from starVLA.analysis.oevla import descriptor, estimate
+from starVLA.analysis.oevla import descriptor, estimate, lerobot_source
 
 BOOTSTRAP_REPS = 2000
 BOOTSTRAP_SEED = 4242
@@ -491,7 +491,7 @@ def _tail_breakdown(per_state):
 
 
 def _state_id(e):
-    return f"{e['suite']}__{e['task']}__{e['demo']}__{e['t0']}"
+    return f"{e['suite']}__{lerobot_source.norm_text(e['task'])}__ep{e['episode_index']}__t{e['t0']}"
 
 
 def _json_default(o):

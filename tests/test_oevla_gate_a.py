@@ -13,11 +13,11 @@
 # limitations under the License.
 """Unit tests for the OE-VLA gate-A package.
 
-Estimation/analysis layers are pure numpy and tested directly; the LIBERO-
-dependent selection path is tested against a tiny synthetic hdf5 (skipped when
-h5py is unavailable). End-to-end gate behavior is exercised on fabricated
-branches covering the GO world (kinematics + object coupling), the kinematic-
-confound NO-GO world and the instrument-failure path.
+Estimation/analysis layers are pure numpy and tested directly; the selection
+path is tested against a tiny synthetic LeRobot v2.1 suite (skipped when
+pandas/pyarrow are unavailable). End-to-end gate behavior is exercised on
+fabricated branches covering the GO world (kinematics + object coupling), the
+kinematic-confound NO-GO world and the instrument-failure path.
 """
 
 import json
@@ -30,7 +30,7 @@ import pytest
 
 from starVLA.analysis.oevla import analyze as analyze_mod
 from starVLA.analysis.oevla import branch as branch_mod
-from starVLA.analysis.oevla import descriptor, estimate
+from starVLA.analysis.oevla import descriptor, estimate, lerobot_source
 
 PHI_DIM = 25  # 6 + 9 * 2 objects + 1
 DIR_DIM = 56
@@ -166,35 +166,30 @@ def test_cluster_bootstrap_ci_constant():
 
 
 def test_select_states(tmp_path):
-    pytest.importorskip("h5py")
-    suite = tmp_path / "libero_spatial"
-    suite.mkdir()
-    for t in ("task_a", "task_b"):
-        _h5py_file(suite / f"{t}.hdf5").close()
-    sel = branch_mod.select_states(str(tmp_path), ["libero_spatial"], 4, seed=42)
-    sel2 = branch_mod.select_states(str(tmp_path), ["libero_spatial"], 4, seed=42)
+    pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    name = "libero_spatial_no_noops_1.0.0_lerobot"
+    _write_lerobot_suite(tmp_path, name)
+    sel = branch_mod.select_states(str(tmp_path), [name], 4, seed=42)
+    sel2 = branch_mod.select_states(str(tmp_path), [name], 4, seed=42)
     assert sel == sel2
     for e in sel["states"]:
         assert 9 <= e["t0"] <= 60 - branch_mod.CHUNK_H - branch_mod.POST_H - 2
+        assert e["task"] in {"task a", "task b"}
     assert len(sel["states"]) == 4
+    ids = {
+        f"{e['suite']}__{lerobot_source.norm_text(e['task'])}__ep{e['episode_index']}__t{e['t0']}"
+        for e in sel["states"]
+    }
+    assert len(ids) == 4
 
 
 def test_calibrate_delta_bar_shape(tmp_path):
-    pytest.importorskip("h5py")
-    import h5py
-
-    suite = tmp_path / "libero_spatial"
-    suite.mkdir()
-    for t in ("task_a", "task_b"):
-        f = h5py.File(suite / f"{t}.hdf5", "w")
-        g = f.create_group("data")
-        g.attrs["env_args"] = json.dumps({"bddl_file_name": "x.bddl"})
-        for d in ("demo_0", "demo_1"):
-            dg = g.create_group(d)
-            dg.create_dataset("states", data=np.zeros((60, 10)))
-            dg.create_dataset("actions", data=np.full((59, 7), 0.01))
-        f.close()
-    sel = branch_mod.select_states(str(tmp_path), ["libero_spatial"], 4, seed=42)
+    pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    name = "libero_spatial_no_noops_1.0.0_lerobot"
+    _write_lerobot_suite(tmp_path, name)
+    sel = branch_mod.select_states(str(tmp_path), [name], 4, seed=42)
     delta_bar = branch_mod.calibrate_delta_bar(sel["states"], str(tmp_path))
     assert delta_bar.shape == (56,)
     assert np.allclose(delta_bar, 0.01)
@@ -202,17 +197,47 @@ def test_calibrate_delta_bar_shape(tmp_path):
     assert chunk.reshape(8, 7).shape == (8, 7)
 
 
-def _h5py_file(path):
-    import h5py
+def test_lerobot_helpers():
+    pytest.importorskip("pandas")
+    name = "libero_goal_no_noops_1.0.0_lerobot"
+    assert lerobot_source.suite_benchmark_key(name) == "libero_goal"
+    assert lerobot_source.norm_text("Turn ON the Stove!") == "turnonthestove"
 
-    f = h5py.File(path, "w")
-    g = f.create_group("data")
-    g.attrs["env_args"] = json.dumps({"bddl_file_name": "x.bddl"})
-    for d in ("demo_0", "demo_1"):
-        dg = g.create_group(d)
-        dg.create_dataset("states", data=np.zeros((60, 10)))
-        dg.create_dataset("actions", data=np.zeros((59, 7)))
-    return f
+
+def _write_lerobot_suite(root, name, tasks=("task a", "task b"), n_eps=4, length=60):
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    d = root / name
+    (d / "meta").mkdir(parents=True)
+    (d / "data" / "chunk-000").mkdir(parents=True)
+    tasks_sorted = sorted(tasks)
+    (d / "meta" / "tasks.jsonl").write_text(
+        "".join(json.dumps({"task_index": i, "task": t}) + "\n" for i, t in enumerate(tasks_sorted))
+    )
+    episodes = []
+    for ep in range(n_eps):
+        task = tasks_sorted[ep % len(tasks_sorted)]
+        actions = np.full((length, 7), 0.01)
+        state = np.zeros((length, 8))
+        episodes.append({"episode_index": ep, "tasks": [task], "task_index": tasks_sorted.index(task), "length": length})
+        df = pd.DataFrame(
+            {
+                "action": [a.tolist() for a in actions],
+                "observation.state": [s.tolist() for s in state],
+                "frame_index": np.arange(length),
+                "episode_index": np.full(length, ep),
+                "task_index": np.full(length, tasks_sorted.index(task)),
+            }
+        )
+        df.to_parquet(d / "data" / "chunk-000" / f"episode_{ep:06d}.parquet", index=False)
+    (d / "meta" / "episodes.jsonl").write_text("".join(json.dumps(r) + "\n" for r in episodes))
+    info = {
+        "codebase_version": "v2.1",
+        "chunks_size": 1000,
+        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+        "features": {"observation.images.image": {"dtype": "video"}},
+    }
+    (d / "meta" / "info.json").write_text(json.dumps(info))
 
 
 def _write_synthetic(out_dir, response_fn, spread=1e-5):
@@ -221,18 +246,17 @@ def _write_synthetic(out_dir, response_fn, spread=1e-5):
     entries = []
     for t in range(4):
         for k in range(8):
-            suite = f"suite{t % 2}"
-            sid = f"{suite}__task_{t}__demo_{k}__{100 + k}"
-            entries.append(
-                {
-                    "suite": suite,
-                    "task": f"task_{t}",
-                    "demo": f"demo_{k}",
-                    "t0": 100 + k,
-                    "state_id": sid,
-                    "transfer": k in (3, 7),
-                }
-            )
+            e = {
+                "suite": f"suite{t % 2}",
+                "task": f"task {t}",
+                "task_index": t,
+                "episode_index": 10 * t + k,
+                "t0": 100 + k,
+                "third": k % 3,
+                "transfer": k in (3, 7),
+            }
+            e["state_id"] = analyze_mod._state_id(e)
+            entries.append(e)
     for e in entries:
         phi0 = rng.standard_normal(PHI_DIM) * 0.1
         snap0 = _snapshot_record()

@@ -14,15 +14,16 @@
 """OE-VLA gate-A entry point (cluster-only; needs the LIBERO eval env).
 
 Stages:
-  verify-determinism  restore mid-episode states and check roundtrip/replay
-                      identity (prerequisite spike, ~minutes);
+  verify-determinism  init-state matching, replay identity, snapshot roundtrip
+                      and repeated-rollout spread for one state per suite
+                      (prerequisite spike, ~minutes);
   generate            counterfactual branches for all selected states;
   analyze             pre-registered gates G0/A1/A2/A4/A6 -> results.json.
 
 Example:
   python -m starVLA.analysis.oevla.run_gate_a --stage generate \
-      --demo-dir /path/to/libero_datasets --per-suite 75 --workers 40 \
-      --out-dir bar/oevla_gate_a
+      --data-root /path/to/OXE_LEROBOT_DATASET/libero_no_noops_1.0.0_lerobot \
+      --per-suite 75 --workers 40 --out-dir bar/oevla_gate_a
 """
 
 import argparse
@@ -30,57 +31,94 @@ import json
 import sys
 from pathlib import Path
 
-from starVLA.analysis import oevla
-from starVLA.analysis.oevla import branch, state_hook
+import numpy as np
 
-DEFAULT_SUITES = ["libero_spatial", "libero_object", "libero_goal", "libero_long"]
-DETERMINISM_STATES = 3
+from starVLA.analysis import oevla
+from starVLA.analysis.oevla import branch, lerobot_source, state_hook
+
+DEFAULT_SUITES = [
+    "libero_spatial_no_noops_1.0.0_lerobot",
+    "libero_object_no_noops_1.0.0_lerobot",
+    "libero_goal_no_noops_1.0.0_lerobot",
+    "libero_10_no_noops_1.0.0_lerobot",
+]
 DETERMINISM_REPS = 3
 
 
 def verify_determinism(args):
     from starVLA.analysis.oevla import descriptor
 
-    demo_dir = Path(args.demo_dir)
-    entries = []
-    for suite in args.suites:
-        files = sorted((demo_dir / suite).glob("*.hdf5"))
-        if not files:
-            raise FileNotFoundError(f"no hdf5 under {demo_dir / suite}")
-        entries.append((suite, files[0].stem, files[0]))
-    report = {"states": [], "all_roundtrip_ok": True, "all_rollouts_ok": True}
-    for suite, task, path in entries:
-        states, actions = branch.task_episode(str(path), branch.load_task_file(str(path))[1][0])
-        env = branch._get_env(str(demo_dir), f"{suite}/{task}", args.camera)
+    data_root = Path(args.data_root)
+    report = {
+        "suites": [],
+        "all_init_ok": True,
+        "all_replay_ok": True,
+        "all_roundtrip_ok": True,
+        "all_rollouts_ok": True,
+        "all_fidelity_ok": True,
+    }
+    for suite_name in args.suites:
+        dataset_dir = data_root / suite_name
+        suite = lerobot_source.LeRobotSuite(dataset_dir)
+        row = next((r for r in suite.episode_rows() if r["length"] >= 2 * branch.CHUNK_H + branch.POST_H + 3), None)
+        if row is None:
+            raise ValueError(f"{suite_name}: no episode long enough for the spike")
+        t0 = branch.CHUNK_H + 1
+        actions = suite.actions(row["episode_index"])
+        env, init_states = branch._get_env(str(dataset_dir), row["task"], args.camera)
         names, source = descriptor.object_bodies(env)
         layout = descriptor.feature_layout(names)
-        t0 = branch.CHUNK_H + 1
         chunk = actions[t0 : t0 + branch.CHUNK_H]
 
         def extract(env=env, layout=layout):
             phi, *_ = descriptor.snapshot_features(env, layout)
             return phi
 
-        out = state_hook.verify_determinism(
-            env, states[t0], list(chunk), extract, n_reps=DETERMINISM_REPS
+        entry = {"suite": suite_name, "episode": row["episode_index"], "task": row["task"], "object_source": source}
+        try:
+            match = branch.match_init_state(
+                env,
+                init_states,
+                suite.proprio(row["episode_index"])[0],
+                suite.frame_rgb(row["episode_index"]),
+            )
+            entry["init_match"] = {k: match[k] for k in ("init", "arm_err", "img_err")}
+            report["all_init_ok"] &= True
+        except ValueError as e:
+            entry["init_match"] = {"error": str(e)}
+            report["all_init_ok"] = False
+            report["suites"].append(entry)
+            env.close()
+            continue
+
+        snap1 = branch.replay_to(env, init_states[match["init"]], actions, t0)
+        snap2 = branch.replay_to(env, init_states[match["init"]], actions, t0)
+        entry["replay_err"] = float(np.max(np.abs(snap1 - snap2)))
+        entry["replay_fidelity"] = float(
+            np.linalg.norm(branch._env_proprio(env.get_obs()) - suite.proprio(row["episode_index"])[t0][:6])
         )
-        out.update({"suite": suite, "task": task, "object_source": source, "phi_dim": len(out["phi"])})
-        del out["phi"]
-        report["states"].append(out)
-        report["all_roundtrip_ok"] &= out["roundtrip_err"] <= state_hook.ROUNDTRIP_TOL
-        report["all_rollouts_ok"] &= out["rollout_spread"] <= state_hook.SPIKE_SPREAD_TOL
+        out = state_hook.verify_determinism(env, snap1, list(chunk), extract, n_reps=DETERMINISM_REPS)
+        entry["roundtrip_err"] = out["roundtrip_err"]
+        entry["rollout_spread"] = out["rollout_spread"]
+        entry["phi_dim"] = len(out["phi"])
+        report["suites"].append(entry)
+        report["all_replay_ok"] &= entry["replay_err"] <= state_hook.SPIKE_SPREAD_TOL
+        report["all_roundtrip_ok"] &= entry["roundtrip_err"] <= state_hook.ROUNDTRIP_TOL
+        report["all_rollouts_ok"] &= entry["rollout_spread"] <= state_hook.SPIKE_SPREAD_TOL
+        report["all_fidelity_ok"] &= entry["replay_fidelity"] <= branch.REPLAY_FIDELITY_TOL
         env.close()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "determinism.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
-    if not (report["all_roundtrip_ok"] and report["all_rollouts_ok"]):
+    gates = [k for k in report if k.startswith("all_")]
+    if not all(report[k] for k in gates):
         sys.exit(1)
 
 
 def generate(args):
     manifest = branch.generate(
-        args.demo_dir,
+        args.data_root,
         args.out_dir,
         args.suites,
         args.per_suite,
@@ -98,17 +136,23 @@ def analyze(args):
     print(json.dumps(results["verdict"], indent=2))
 
 
-def main():
-    parser = argparse.ArgumentParser(description="OE-VLA gate A")
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--stage", required=True, choices=["verify-determinism", "generate", "analyze"])
-    parser.add_argument("--demo-dir", required=True)
-    parser.add_argument("--out-dir", default="bar/oevla_gate_a")
+    parser.add_argument("--data-root", help="root containing the LeRobot LIBERO suite dirs")
+    parser.add_argument("--out-dir", required=True)
     parser.add_argument("--suites", nargs="+", default=DEFAULT_SUITES)
     parser.add_argument("--per-suite", type=int, default=75)
-    parser.add_argument("--seed", type=int, default=oevla.SEED)
+    parser.add_argument("--seed", type=int, default=getattr(oevla, "SEED", 42))
     parser.add_argument("--workers", type=int, default=40)
-    parser.add_argument("--camera", type=int, default=None)
-    args = parser.parse_args()
+    parser.add_argument("--camera", type=int, default=None, help="render resolution (default: dataset 256)")
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    if args.stage in ("verify-determinism", "generate") and not args.data_root:
+        raise SystemExit("--data-root is required for this stage")
     {"verify-determinism": verify_determinism, "generate": generate, "analyze": analyze}[args.stage](args)
 
 

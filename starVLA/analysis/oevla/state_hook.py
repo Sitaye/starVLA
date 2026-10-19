@@ -13,11 +13,12 @@
 # limitations under the License.
 """Simulator state snapshot/restore and determinism verification.
 
-LIBERO follows robosuite conventions: hdf5 demos store per-step flat simulator
-states (data/<demo>/states), and eval restores them with env.set_init_state
-(eval_libero.py). Gate A restores MID-EPISODE states with the same API; the
-determinism spike (run_gate_a.py --stage verify-determinism) must validate this
-usage before any branch generation. Restore call order is pre-registered:
+LIBERO follows robosuite conventions: eval restores simulator states with
+env.set_init_state (eval_libero.py); Gate A restores MID-EPISODE states the
+same way, where the flat state is reconstructed by demo replay (branch.replay_to,
+LeRobot demos carry no simulator states). The determinism spike
+(run_gate_a.py --stage verify-determinism) must validate this usage before any
+branch generation. Restore call order is pre-registered:
 set_state_from_flattened (exact state API) falling back to set_init_state.
 """
 
