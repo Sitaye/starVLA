@@ -412,9 +412,10 @@ def generate(data_root, out_dir, suites, per_suite, seed, workers, camera=None):
             entry["object_names"] = rec0["object_names"]
             entry["object_source"] = rec0["object_source"]
             entry["init_index"] = rec0["init_index"]
-            entry["init_arm_err"] = rec0["init_arm_err"]
+            entry["init_pos_err"] = rec0["init_pos_err"]
+            entry["init_rot_err"] = rec0["init_rot_err"]
             entry["init_img_err"] = rec0["init_img_err"]
-            entry["replay_drift"] = rec0["replay_drift"]
+            entry["replay_excess"] = rec0["replay_excess"]
             with (out / "branches" / f"{state_id}.jsonl").open("w") as f:
                 for rec in records:
                     f.write(json.dumps(rec) + "\n")
@@ -438,7 +439,10 @@ def generate(data_root, out_dir, suites, per_suite, seed, workers, camera=None):
         "camera": camera,
         "states": len(entries),
         "failed_states": n_fail,
-        "replay_drift_max": max([e.get("replay_drift") or 0.0 for e in entries], default=0.0),
+        "replay_excess_max": max(
+            [max(e["replay_excess"].values()) for e in entries if e.get("replay_excess")],
+            default=0.0,
+        ),
         "oevla_version": getattr(oevla, "__version__", "0.1"),
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
