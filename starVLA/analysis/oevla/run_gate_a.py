@@ -92,12 +92,16 @@ def verify_determinism(args):
             return phi
 
         entry = {"suite": suite_name, "episode": row["episode_index"], "task": row["task"], "object_source": source}
+        rec = suite.proprio(row["episode_index"])
         try:
-            match = branch.match_init_state(
+            match = branch.match_by_replay(
                 env,
                 init_states,
-                suite.proprio(row["episode_index"])[0],
+                rec[0],
                 suite.frame_rgb(row["episode_index"]),
+                actions,
+                t0,
+                rec,
             )
             entry["init_match"] = {k: match[k] for k in ("init", "pos_err", "rot_err", "img_err")}
             report["all_init_ok"] &= True
@@ -108,17 +112,10 @@ def verify_determinism(args):
             env.close()
             continue
 
-        rec = suite.proprio(row["episode_index"])
-        f0 = branch._env_proprio(env.set_init_state(np.asarray(init_states[match["init"]], dtype=float).flatten()))
         snap1 = branch.replay_to(env, init_states[match["init"]], actions, t0)
         snap2 = branch.replay_to(env, init_states[match["init"]], actions, t0)
         entry["replay_err"] = float(np.max(np.abs(snap1 - snap2)))
-        prop_t0 = branch._env_proprio(descriptor.env_obs(env))
-        # Fidelity excess over the frame-0 residual (constant offsets cancel).
-        entry["replay_excess"] = {
-            "pos": float(np.linalg.norm((prop_t0[:3] - rec[t0][:3]) - (f0[:3] - rec[0][:3]))),
-            "rot": float(np.linalg.norm((prop_t0[3:6] - rec[t0][3:6]) - (f0[3:6] - rec[0][3:6]))),
-        }
+        entry["replay_excess"] = match["replay_excess"]
         out = state_hook.verify_determinism(env, snap1, list(chunk), extract, n_reps=DETERMINISM_REPS)
         entry["roundtrip_err"] = out["roundtrip_err"]
         entry["rollout_spread"] = out["rollout_spread"]

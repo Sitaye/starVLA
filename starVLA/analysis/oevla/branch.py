@@ -49,6 +49,7 @@ INIT_POS_TOL = 0.05
 INIT_ROT_TOL = 0.20
 INIT_IMG_TOL = 12.0
 REPLAY_FIDELITY_TOL = 0.05
+REPLAY_MATCH_K = 5
 
 _ENV_CACHE = {}
 _SUITE_CACHE = {}
@@ -130,13 +131,8 @@ def _env_image(obs):
     return np.asarray(obs[keys[0]])[::-1, ::-1].copy()
 
 
-def match_init_state(env, init_states, target_proprio, target_img):
-    """Identify which benchmark init state generated the episode.
-
-    Arm proprio is nearly constant across candidates (every reset homes the
-    arm), so selection is image-primary (object layout differs per candidate);
-    pos/rot residuals are sanity gates on the frame-0 offset. Raises when no
-    candidate satisfies all three pre-registered tolerances."""
+def _rank_candidates(env, init_states, target_proprio, target_img):
+    """Frame-0 residuals for every benchmark init state, sorted by image."""
     env.reset()
     candidates = []
     for j, init in enumerate(init_states):
@@ -156,6 +152,60 @@ def match_init_state(env, init_states, target_proprio, target_img):
             }
         )
     candidates.sort(key=lambda c: (c["img_err"], c["pos_err"]))
+    return candidates
+
+
+def _replay_state(env, init_state, actions, t0):
+    """Reset -> init state -> frame-0 proprio -> demo actions[:t0] -> snapshot."""
+    env.reset()
+    env.set_init_state(np.asarray(init_state, dtype=float).flatten())
+    f0 = _env_proprio(descriptor.env_obs(env))
+    for action in actions[:t0]:
+        env.step(np.asarray(action, dtype=float))
+    return f0, state_hook.snapshot(env)
+
+
+def match_by_replay(env, init_states, target_proprio, target_img, actions, t0, rec):
+    """Pick the init candidate whose replay reproduces the recorded trajectory.
+
+    Frame-0 img/pos/rot cannot separate correct matches from wrong-layout
+    candidates (generate round 1: 65/280 states exceeded the fidelity
+    tolerance at img_err 8-12, max 0.835), so the decisive criterion is the
+    pre-registered replay-fidelity gate itself: candidates passing the pos/rot
+    sanity gates are ranked by image, the top REPLAY_MATCH_K are replayed to
+    t0, and the first with excess <= REPLAY_FIDELITY_TOL on both axes wins."""
+    ranked = _rank_candidates(env, init_states, target_proprio, target_img)
+    cands = [c for c in ranked if c["pos_err"] < INIT_POS_TOL and c["rot_err"] < INIT_ROT_TOL]
+    if not cands:
+        top = ", ".join(
+            f"init{c['init']}(pos={c['pos_err']:.3f},rot={c['rot_err']:.3f})" for c in ranked[:3]
+        )
+        raise ValueError(f"no init candidate passes frame-0 sanity gates ({top})")
+    tried = []
+    for c in cands[:REPLAY_MATCH_K]:
+        f0, _ = _replay_state(env, init_states[c["init"]], actions, t0)
+        prop_t0 = _env_proprio(descriptor.env_obs(env))
+        excess = {
+            "pos": float(np.linalg.norm((prop_t0[:3] - rec[t0][:3]) - (f0[:3] - rec[0][:3]))),
+            "rot": float(np.linalg.norm((prop_t0[3:6] - rec[t0][3:6]) - (f0[3:6] - rec[0][3:6]))),
+        }
+        tried.append((c, excess))
+        if excess["pos"] <= REPLAY_FIDELITY_TOL and excess["rot"] <= REPLAY_FIDELITY_TOL:
+            return {**c, "replay_excess": excess}
+    tops = ", ".join(
+        f"init{c['init']}(excess={e['pos']:.3f}/{e['rot']:.3f})" for c, e in tried[:3]
+    )
+    raise ValueError(f"no init candidate reproduces the recorded trajectory ({tops})")
+
+
+def match_init_state(env, init_states, target_proprio, target_img):
+    """Legacy frame-0 image matching (diagnostic probe path).
+
+    Arm proprio is nearly constant across candidates (every reset homes the
+    arm), so selection is image-primary (object layout differs per candidate);
+    pos/rot residuals are sanity gates on the frame-0 offset. Raises when no
+    candidate satisfies all three pre-registered tolerances."""
+    candidates = _rank_candidates(env, init_states, target_proprio, target_img)
     for c in candidates:
         if c["pos_err"] < INIT_POS_TOL and c["rot_err"] < INIT_ROT_TOL and c["img_err"] < INIT_IMG_TOL:
             return c
@@ -168,11 +218,7 @@ def match_init_state(env, init_states, target_proprio, target_img):
 
 def replay_to(env, init_state, actions, t0):
     """Reconstruct the mid-episode sim state: init -> demo actions[:t0]."""
-    env.reset()
-    env.set_init_state(np.asarray(init_state, dtype=float).flatten())
-    for action in actions[:t0]:
-        env.step(np.asarray(action, dtype=float))
-    return state_hook.snapshot(env)
+    return _replay_state(env, init_state, actions, t0)[1]
 
 
 def select_states(data_root, suites, per_suite, seed, transfer_p=TRANSFER_P):
@@ -305,22 +351,21 @@ def state_branches(dataset_dir, entry, delta_bar, seed, camera=None):
     state_id = f"{entry['suite']}__{lerobot_source.norm_text(entry['task'])}__ep{entry['episode_index']}__t{entry['t0']}"
     state_seed = int(seed + zlib.crc32(state_id.encode("utf-8")))
 
-    match_key = (str(dataset_dir), entry["episode_index"])
+    match_key = (str(dataset_dir), entry["episode_index"], entry["t0"])
     if match_key not in _MATCH_CACHE:
-        target = suite.proprio(entry["episode_index"])[0]
-        target_img = suite.frame_rgb(entry["episode_index"])
-        _MATCH_CACHE[match_key] = match_init_state(env, init_states, target, target_img)
+        rec = suite.proprio(entry["episode_index"])
+        _MATCH_CACHE[match_key] = match_by_replay(
+            env,
+            init_states,
+            rec[0],
+            suite.frame_rgb(entry["episode_index"]),
+            actions,
+            entry["t0"],
+            rec,
+        )
     match = _MATCH_CACHE[match_key]
-    rec = suite.proprio(entry["episode_index"])
-    f0 = _env_proprio(env.set_init_state(np.asarray(init_states[match["init"]], dtype=float).flatten()))
     state = replay_to(env, init_states[match["init"]], actions, entry["t0"])
-    prop_t0 = _env_proprio(descriptor.env_obs(env))
-    # Fidelity excess over the frame-0 residual: the constant convention/pose
-    # offset cancels, only genuine replay divergence survives.
-    replay_excess = {
-        "pos": float(np.linalg.norm((prop_t0[:3] - rec[entry["t0"]][:3]) - (f0[:3] - rec[0][:3]))),
-        "rot": float(np.linalg.norm((prop_t0[3:6] - rec[entry["t0"]][3:6]) - (f0[3:6] - rec[0][3:6]))),
-    }
+    replay_excess = match["replay_excess"]
 
     base = run_branch(env, state, state_seed, chunk, post, layout)
     records = [

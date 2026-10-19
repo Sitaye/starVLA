@@ -163,6 +163,77 @@ def test_match_init_state_rot_gate_rejects():
         branch_mod.match_init_state(env, [np.zeros(1)], target_proprio, target_img)
 
 
+class _FakeReplayEnv:
+    """prop(t) = rec0 + drift*t; drift is read from the init vector."""
+
+    class _Sim:
+        class data:
+            pass
+
+        @staticmethod
+        def get_state():
+            return np.zeros(1)
+
+        @staticmethod
+        def forward():
+            pass
+
+        def set_state_from_flattened(self, _state):
+            pass
+
+    def __init__(self, img, rec):
+        self._img = img
+        self._rec = rec
+        self._drift = 0.0
+        self._t = 0
+        self.sim = self._Sim()
+
+    def reset(self):
+        pass
+
+    def _get_observations(self):
+        prop = self._rec[0].copy()
+        prop[:3] += self._drift * self._t
+        return {"robot0_eef_pos": prop[:3], "robot0_eef_quat": np.array([0.0, 0.0, 0.0, 1.0])}
+
+    def set_init_state(self, flat):
+        self._drift = float(flat[0])
+        self._t = 0
+        return self._get_observations() | {"agentview_image": self._img[::-1, ::-1]}
+
+    def step(self, _action):
+        self._t += 1
+        return {}, 0.0, False, {}
+
+
+def test_match_by_replay_picks_reproducing_candidate():
+    rng = np.random.default_rng(9)
+    target_img = rng.integers(0, 255, (8, 8, 3), dtype=np.uint8)
+    rec = np.zeros((40, 6))
+    rec[:, :3] = [1.0, 2.0, 3.0]  # constant recorded proprio, pos block
+    t0, actions = 10, [np.zeros(7)] * 10
+    inits = [np.array([0.0]), np.array([0.3]), np.array([0.6])]
+    env = _FakeReplayEnv(target_img, rec)
+    # candidate 0 reproduces the record exactly; candidates 1/2 drift 3.0/6.0 m.
+    match = branch_mod.match_by_replay(env, inits, rec[0], target_img, actions, t0, rec)
+    assert match["init"] == 0
+    assert match["replay_excess"]["pos"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_match_by_replay_rejects_all_divergent():
+    rng = np.random.default_rng(10)
+    target_img = rng.integers(0, 255, (8, 8, 3), dtype=np.uint8)
+    rec = np.zeros((40, 6))
+    rec[:, :3] = [1.0, 2.0, 3.0]
+    rec[10, :3] = [2.0, 3.0, 4.0]  # recorded proprio moves; no candidate reproduces it
+    env = _FakeReplayEnv(target_img, rec)
+    with pytest.raises(ValueError, match="no init candidate reproduces"):
+        branch_mod.match_by_replay(
+            env, [np.array([0.3]), np.array([0.6])], rec[0], target_img,
+            [np.zeros(7)] * 10, 10, rec,
+        )
+
+
 def _static_snapshot(grasp_name=None):
     rng = np.random.default_rng(2)
     return {
