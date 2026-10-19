@@ -82,7 +82,7 @@ def _probe_suite(suite_name, dataset_dir, out_dir, n_candidates):
     }
     best = report["best_rel"]
     branch.replay_to(env, init_states[best["init"]], actions, t0=branch.CHUNK_H + 1)
-    prop = branch._env_proprio(env.get_obs())
+    prop = branch._env_proprio(env.get_observation())
     report["replay_from_best_rel"] = {
         "init": best["init"],
         "drift_abs": float(np.linalg.norm(prop - state[branch.CHUNK_H + 1][:6])),
@@ -90,7 +90,7 @@ def _probe_suite(suite_name, dataset_dir, out_dir, n_candidates):
     }
     from PIL import Image
 
-    pair = np.concatenate([np.asarray(suite.frame_rgb(ep)), branch._env_image(env.get_obs())], axis=1)
+    pair = np.concatenate([np.asarray(suite.frame_rgb(ep)), branch._env_image(env.get_observation())], axis=1)
     Image.fromarray(pair).save(out_dir / f"{suite_name}.png")
     env.close()
     return report

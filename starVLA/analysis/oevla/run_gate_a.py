@@ -112,7 +112,7 @@ def verify_determinism(args):
         snap2 = branch.replay_to(env, init_states[match["init"]], actions, t0)
         entry["replay_err"] = float(np.max(np.abs(snap1 - snap2)))
         entry["replay_fidelity"] = float(
-            np.linalg.norm(branch._env_proprio(env.get_obs()) - suite.proprio(row["episode_index"])[t0][:6])
+            np.linalg.norm(branch._env_proprio(env.get_observation()) - suite.proprio(row["episode_index"])[t0][:6])
         )
         out = state_hook.verify_determinism(env, snap1, list(chunk), extract, n_reps=DETERMINISM_REPS)
         entry["roundtrip_err"] = out["roundtrip_err"]
