@@ -57,6 +57,9 @@ def _setup_libero_env(libero_home):
     parts = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
     if home not in parts:
         os.environ["PYTHONPATH"] = os.pathsep.join([*parts, home])
+    # os.environ edits do not affect sys.path of the running interpreter.
+    if home not in sys.path:
+        sys.path.append(home)
 
 
 def verify_determinism(args):
