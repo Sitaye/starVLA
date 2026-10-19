@@ -27,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from starVLA.analysis.oevla import branch, lerobot_source, run_gate_a
+from starVLA.analysis.oevla import branch, descriptor, lerobot_source, run_gate_a
 
 
 def _base_candidates(env):
@@ -82,7 +82,7 @@ def _probe_suite(suite_name, dataset_dir, out_dir, n_candidates):
     }
     best = report["best_rel"]
     branch.replay_to(env, init_states[best["init"]], actions, t0=branch.CHUNK_H + 1)
-    prop = branch._env_proprio(env._get_observations())
+    prop = branch._env_proprio(descriptor.env_obs(env))
     report["replay_from_best_rel"] = {
         "init": best["init"],
         "drift_abs": float(np.linalg.norm(prop - state[branch.CHUNK_H + 1][:6])),
@@ -90,7 +90,7 @@ def _probe_suite(suite_name, dataset_dir, out_dir, n_candidates):
     }
     from PIL import Image
 
-    pair = np.concatenate([np.asarray(suite.frame_rgb(ep)), branch._env_image(env._get_observations())], axis=1)
+    pair = np.concatenate([np.asarray(suite.frame_rgb(ep)), branch._env_image(descriptor.env_obs(env))], axis=1)
     Image.fromarray(pair).save(out_dir / f"{suite_name}.png")
     env.close()
     return report

@@ -108,9 +108,24 @@ def object_bodies(env):
     return sorted(set(names)), "body_names_filter"
 
 
+def env_obs(env):
+    """Observation dict from whichever accessor this robosuite build exposes.
+
+    The LIBERO wrapper delegates nothing, so walk env -> env.env and try the
+    accessors seen across robosuite/LIBERO versions.
+    """
+    for name in ("_get_observations", "get_observation", "get_obs"):
+        target = env
+        while target is not None:
+            if hasattr(target, name):
+                return getattr(target, name)()
+            target = getattr(target, "env", None)
+    raise AttributeError(f"no observation accessor on {type(env).__name__}")
+
+
 def snapshot_features(env, layout):
     """Read eef pose, object poses and gripper width from a LIBERO env."""
-    obs = env._get_observations()
+    obs = env_obs(env)
     eef_pos = np.asarray(obs["robot0_eef_pos"], dtype=float)
     eef_quat = np.asarray(obs["robot0_eef_quat"], dtype=float)
     ids = env.sim.model.body_name2id

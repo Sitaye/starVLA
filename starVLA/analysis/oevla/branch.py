@@ -296,7 +296,7 @@ def state_branches(dataset_dir, entry, delta_bar, seed, camera=None):
     match = _MATCH_CACHE[match_key]
     state = replay_to(env, init_states[match["init"]], actions, entry["t0"])
     replay_drift = float(
-        np.linalg.norm(_env_proprio(env._get_observations()) - suite.proprio(entry["episode_index"])[entry["t0"]][:6])
+        np.linalg.norm(_env_proprio(descriptor.env_obs(env)) - suite.proprio(entry["episode_index"])[entry["t0"]][:6])
     )
 
     base = run_branch(env, state, state_seed, chunk, post, layout)
