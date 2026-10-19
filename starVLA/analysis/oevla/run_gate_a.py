@@ -28,6 +28,7 @@ Example:
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -43,6 +44,19 @@ DEFAULT_SUITES = [
     "libero_10_no_noops_1.0.0_lerobot",
 ]
 DETERMINISM_REPS = 3
+
+
+def _setup_libero_env(libero_home):
+    """Point the libero package at its repo (eval_libero.sh parity)."""
+    home = libero_home or os.environ.get("LIBERO_HOME")
+    if not home:
+        raise SystemExit("LIBERO location required: pass --libero-home or export LIBERO_HOME")
+    os.environ.setdefault("MUJOCO_GL", "egl")
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    os.environ["LIBERO_CONFIG_PATH"] = os.path.join(home, "libero")
+    parts = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+    if home not in parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join([*parts, home])
 
 
 def verify_determinism(args):
@@ -146,13 +160,16 @@ def build_parser():
     parser.add_argument("--seed", type=int, default=getattr(oevla, "SEED", 42))
     parser.add_argument("--workers", type=int, default=40)
     parser.add_argument("--camera", type=int, default=None, help="render resolution (default: dataset 256)")
+    parser.add_argument("--libero-home", default=None, help="LIBERO repo root (default: $LIBERO_HOME)")
     return parser
 
 
 def main():
     args = build_parser().parse_args()
-    if args.stage in ("verify-determinism", "generate") and not args.data_root:
-        raise SystemExit("--data-root is required for this stage")
+    if args.stage in ("verify-determinism", "generate"):
+        if not args.data_root:
+            raise SystemExit("--data-root is required for this stage")
+        _setup_libero_env(args.libero_home)
     {"verify-determinism": verify_determinism, "generate": generate, "analyze": analyze}[args.stage](args)
 
 
