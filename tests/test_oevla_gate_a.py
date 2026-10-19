@@ -219,7 +219,8 @@ def _write_lerobot_suite(root, name, tasks=("task a", "task b"), n_eps=4, length
         task = tasks_sorted[ep % len(tasks_sorted)]
         actions = np.full((length, 7), 0.01)
         state = np.zeros((length, 8))
-        episodes.append({"episode_index": ep, "tasks": [task], "task_index": tasks_sorted.index(task), "length": length})
+        # Real v2.1 episodes.jsonl rows carry `tasks` (list), not task_index.
+        episodes.append({"episode_index": ep, "tasks": [task], "length": length})
         df = pd.DataFrame(
             {
                 "action": [a.tolist() for a in actions],
@@ -235,6 +236,7 @@ def _write_lerobot_suite(root, name, tasks=("task a", "task b"), n_eps=4, length
         "codebase_version": "v2.1",
         "chunks_size": 1000,
         "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
         "features": {"observation.images.image": {"dtype": "video"}},
     }
     (d / "meta" / "info.json").write_text(json.dumps(info))

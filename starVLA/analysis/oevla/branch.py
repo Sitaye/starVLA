@@ -106,7 +106,7 @@ def _get_env(dataset_dir, task, camera):
             "camera_widths": camera or 256,
         }
         env = OffScreenRenderEnv(**env_args)
-        env.seed(int(sum(zlib.crc32(task.encode("utf-8")) for _ in [0]) + task_id))
+        env.seed(zlib.crc32(task.encode("utf-8")) + task_id)
         _ENV_CACHE[key] = (env, np.asarray(bench.get_task_init_states(task_id), dtype=float))
     return _ENV_CACHE[key]
 

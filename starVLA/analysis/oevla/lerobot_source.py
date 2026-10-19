@@ -71,17 +71,30 @@ class LeRobotSuite:
         if self.info.get("codebase_version") != "v2.1":
             raise ValueError(f"{self.dataset_dir}: expected LeRobot v2.1, got {self.info.get('codebase_version')}")
         self.tasks = {row["task_index"]: row["task"] for row in _read_jsonl(meta / "tasks.jsonl")}
+        self._task_index = {task: idx for idx, task in self.tasks.items()}
         self.episodes = sorted(_read_jsonl(meta / "episodes.jsonl"), key=lambda r: int(r["episode_index"]))
         self.benchmark_key = suite_benchmark_key(self.dataset_dir)
         self._actions = {}
         self._proprio = {}
 
+    def _episode_task_row(self, row):
+        """Real v2.1 episodes.jsonl rows carry `tasks` (list), not task_index."""
+        if "task_index" in row:
+            return self.tasks[int(row["task_index"])], int(row["task_index"])
+        task = row["tasks"][0]
+        if task not in self._task_index:
+            raise ValueError(f"{self.dataset_dir}: episode task {task!r} missing from tasks.jsonl")
+        return task, self._task_index[task]
+
     def episode_rows(self):
-        return [
-            {"episode_index": int(row["episode_index"]), "task": self.tasks[int(row["task_index"])],
-             "task_index": int(row["task_index"]), "length": int(row["length"])}
-            for row in self.episodes
-        ]
+        rows = []
+        for row in self.episodes:
+            task, task_index = self._episode_task_row(row)
+            rows.append(
+                {"episode_index": int(row["episode_index"]), "task": task, "task_index": task_index,
+                 "length": int(row["length"])}
+            )
+        return rows
 
     def actions(self, episode_index):
         if episode_index not in self._actions:
@@ -110,8 +123,7 @@ class LeRobotSuite:
     def episode_task(self, episode_index):
         for row in self.episodes:
             if int(row["episode_index"]) == episode_index:
-                task_index = int(row["task_index"]) if "task_index" in row else None
-                return self.tasks[task_index] if task_index is not None else row["tasks"][0]
+                return self._episode_task_row(row)[0]
         raise KeyError(f"{self.dataset_dir}: no episode {episode_index}")
 
     def frame_rgb(self, episode_index, frame=0):
@@ -119,8 +131,15 @@ class LeRobotSuite:
         import av
 
         info = self.info
-        video_key = next(k for k in info["features"] if k.startswith("observation.images.") and "wrist" not in k)
+        video_key = next(
+            (k for k in info["features"] if k.startswith("observation.images.") and "wrist" not in k),
+            None,
+        )
+        if video_key is None:
+            raise ValueError(f"{self.dataset_dir}: no non-wrist observation.images.* video key in info.json")
         chunk = episode_index // int(info["chunks_size"])
+        if "video_path" not in info:
+            raise ValueError(f"{self.dataset_dir}: info.json missing video_path (LeRobot v2.1)")
         path = self.dataset_dir / info["video_path"].format(
             episode_chunk=chunk, episode_index=episode_index, video_key=video_key
         )
