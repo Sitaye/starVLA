@@ -243,8 +243,9 @@ def calibrate_delta_bar(entries, data_root):
 def run_branch(env, state, seed, chunk, post, layout):
     """One rollout: restore -> (perturbed) chunk -> fixed expert continuation.
 
-    Returns phi at chunk end and post-horizon, success via _check_success
-    (done recorded separately), and the analytic-baseline snapshot.
+    Returns phi at chunk end and post-horizon. success = step's done flag
+    (repo eval convention: in this LIBERO build env.step's done encodes
+    task success, cf. eval_libero.py done-as-success counting).
     """
     env.seed(int(seed))
     env.reset()
@@ -265,7 +266,7 @@ def run_branch(env, state, seed, chunk, post, layout):
             break
     if phi_chunk is None:
         raise RuntimeError("chunk did not complete (env crashed mid-chunk)")
-    success = bool(env._check_success())
+    success = bool(done)
     if done:
         phi_post = phi_chunk
     else:
@@ -286,7 +287,6 @@ def run_branch(env, state, seed, chunk, post, layout):
         "phi_chunk": phi_chunk.tolist(),
         "phi_post": phi_post.tolist(),
         "success": int(success),
-        "done": bool(done),
         "n_steps": n_steps,
         "valid": valid,
         "snapshot": snapshot,
@@ -339,7 +339,6 @@ def state_branches(dataset_dir, entry, delta_bar, seed, camera=None):
             "init_img_err": match["img_err"] if r == 0 else None,
             "replay_excess": replay_excess if r == 0 else None,
             "success": base["success"],
-            "done": base["done"],
             "n_steps": base["n_steps"],
             "valid": base["valid"],
             "phi_chunk": base["phi_chunk"],
@@ -364,7 +363,6 @@ def state_branches(dataset_dir, entry, delta_bar, seed, camera=None):
                 "dir": perturb.reshape(-1).tolist(),
                 "fold": fold,
                 "success": out["success"],
-                "done": out["done"],
                 "n_steps": out["n_steps"],
                 "valid": out["valid"],
                 "phi_chunk": out["phi_chunk"],
