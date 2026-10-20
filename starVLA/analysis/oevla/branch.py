@@ -52,6 +52,8 @@ REPLAY_FIDELITY_TOL = 0.05
 REPLAY_MATCH_K = 5
 
 _ENV_CACHE = {}
+_ENV_CACHE_MAX = 8  # FIFO bound: a worker touches one env per task across a full
+                    # suite; unbounded caching OOM-kills workers at high worker counts
 _SUITE_CACHE = {}
 _MATCH_CACHE = {}
 
@@ -109,6 +111,11 @@ def _get_env(dataset_dir, task, camera):
         env = OffScreenRenderEnv(**env_args)
         env.seed(zlib.crc32(task.encode("utf-8")) + task_id)
         _ENV_CACHE[key] = (env, np.asarray(bench.get_task_init_states(task_id), dtype=float))
+        if len(_ENV_CACHE) > _ENV_CACHE_MAX:
+            stale_env, _ = _ENV_CACHE.pop(next(iter(_ENV_CACHE)))
+            close = getattr(stale_env, "close", None)
+            if callable(close):
+                close()
     return _ENV_CACHE[key]
 
 
