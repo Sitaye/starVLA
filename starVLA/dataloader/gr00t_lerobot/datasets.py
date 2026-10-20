@@ -57,6 +57,7 @@ from typing import Tuple, List
 import pickle
 import multiprocessing as mp
 from starVLA.dataloader.flow_cache import FlowTargetCache
+from starVLA.dataloader.oe_cache import OutcomeGeometryCache
 
 # LeRobot v2.0 dataset file names 
 LE_ROBOT_MODALITY_FILENAME = "meta/modality.json"
@@ -2230,6 +2231,14 @@ class LeRobotMixtureDataset(Dataset):
         self.data_cfg = kwargs["data_cfg"] if "data_cfg" in kwargs else None
         motion_flow_root = self.data_cfg.get("motion_flow_root", None) if self.data_cfg is not None else None
         self.flow_cache = FlowTargetCache(motion_flow_root) if motion_flow_root else None
+        oe_g_root = self.data_cfg.get("oe_g_root", None) if self.data_cfg is not None else None
+        self.oe_cache = (
+            OutcomeGeometryCache(oe_g_root, shuffle=bool(self.data_cfg.get("oe_shuffle", False)))
+            if oe_g_root
+            else None
+        )
+        if self.oe_cache is not None:
+            self.oe_cache.validate_suites([d.dataset_name for d in self.datasets])
         self.drop_incomplete_action_chunks = bool(
             self.data_cfg.get("drop_incomplete_action_chunks", False)
             if self.data_cfg is not None
@@ -2467,6 +2476,8 @@ class LeRobotMixtureDataset(Dataset):
                     flow_target, flow_target_q = self.flow_cache.get(dataset.dataset_name, trajectory_id, step)
                     sample["flow_target"] = flow_target
                     sample["flow_target_q"] = flow_target_q
+                if self.oe_cache is not None:
+                    sample["oe"] = self.oe_cache.get(dataset.dataset_name, trajectory_id, step)
                 return sample
                 
             except Exception as e:

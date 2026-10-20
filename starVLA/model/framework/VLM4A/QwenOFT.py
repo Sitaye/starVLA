@@ -28,6 +28,7 @@ import torch
 from PIL import Image
 
 from deployment.model_server.tools.image_tools import to_pil_preserve
+from starVLA.model.modules.oe_loss import OE_MODES, oe_quadratic
 from starVLA.model.tools import FRAMEWORK_REGISTRY
 from starVLA.training.trainer_utils import initialize_overwatch
 
@@ -49,6 +50,7 @@ def masked_l1_loss(prediction: torch.Tensor, target: torch.Tensor, mask: torch.T
     if not torch.any(mask):
         raise ValueError("action_mask contains no valid targets")
     return (error * valid).sum() / denominator
+
 
 from starVLA.model.framework.base_framework import baseframework
 from starVLA.model.framework.share_tools import add_discretized_state_to_instruction, merge_framework_config
@@ -182,6 +184,15 @@ class Qwenvl_OFT(baseframework):
             self.motion_warmup_steps = int(self.config.trainer.num_warmup_steps)
             self.motion_head = MotionHead(self.qwen_vl_interface.model.config.hidden_size)
 
+        oe_cfg = self.config.framework.get("oe", None)
+        self.oe_mode = oe_cfg.get("mode", "full") if oe_cfg else None
+        if oe_cfg is not None:
+            if self.oe_mode not in OE_MODES:
+                raise ValueError(f"unsupported framework.oe.mode {self.oe_mode} (expected one of {OE_MODES})")
+            self.oe_loss_weight = float(oe_cfg.get("loss_weight", 1.0))
+            if self.motion_mode is not None:
+                raise ValueError("framework.motion and framework.oe are mutually exclusive (gate B arms)")
+
     def forward(
         self,
         examples: List[dict] = None,
@@ -259,9 +270,27 @@ class Qwenvl_OFT(baseframework):
                 )[:, -self.action_horizon :, :]
             action_loss = masked_l1_loss(pred_actions, actions_target, action_mask)
 
-            motion_loss, compat = None, None
+            oe_loss, result_oe = None, None
             total_loss = action_loss
+            if self.oe_mode is not None:
+                # Gate-B OE term: additive auxiliary, frozen lambda_OE (no warmup),
+                # mutually exclusive with the motion system (gate B arms).
+                if action_mask is not None:
+                    raise ValueError("framework.oe assumes unmasked action chunks; drop the masks or disable oe")
+                if "oe" not in examples[0]:
+                    raise ValueError(
+                        "framework.oe is enabled but the sample carries no oe payload; "
+                        "set datasets.vla_data.oe_g_root (starVLA.analysis.oevla.precompute_g)"
+                    )
+                payload = [example["oe"] for example in examples]
+                e_norm = (pred_actions - actions_target).reshape(pred_actions.shape[0], -1)
+                oe_loss, oe_valid_frac = oe_quadratic(payload, e_norm, self.oe_mode, self.chunk_len)
+                total_loss = total_loss + self.oe_loss_weight * oe_loss
+                result_oe = {"oe_loss": oe_loss.detach(), "oe_valid_frac": oe_valid_frac}
+
+            motion_loss, compat = None, None
             if self.motion_mode is not None:
+                total_loss = action_loss
                 step = kwargs.get("step")
                 lam = self.motion_loss_weight
                 if step is not None and self.motion_warmup_steps:
@@ -387,6 +416,8 @@ class Qwenvl_OFT(baseframework):
         result = {"total_loss": total_loss, "pure_action_loss": action_loss.detach()}
         if motion_loss is not None:
             result.update(result_motion)
+        if oe_loss is not None:
+            result.update(result_oe)
         return result
 
     @torch.inference_mode()
