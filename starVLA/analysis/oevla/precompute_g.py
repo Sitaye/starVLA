@@ -43,7 +43,7 @@ import numpy as np
 
 from starVLA.analysis import oevla
 from starVLA.analysis.oevla import branch, descriptor, estimate, lerobot_source
-from starVLA.analysis.oevla.run_gate_a import DEFAULT_SUITES
+from starVLA.analysis.oevla.run_gate_a import DEFAULT_SUITES, _setup_libero_env
 
 G_DTYPE = np.float16
 MATCH_T0 = branch.CHUNK_H + 1
@@ -246,7 +246,9 @@ def main():
     parser.add_argument("--seed", type=int, default=oevla.SEED)
     parser.add_argument("--workers", type=int, default=40)
     parser.add_argument("--camera", type=int, default=None)
+    parser.add_argument("--libero-home", default=None, help="LIBERO repo root (default: $LIBERO_HOME)")
     args = parser.parse_args()
+    _setup_libero_env(args.libero_home)
     suites = args.suites or list(DEFAULT_SUITES)
     precompute(args.data_root, args.out_root, suites, args.seed, args.workers, args.camera)
 
