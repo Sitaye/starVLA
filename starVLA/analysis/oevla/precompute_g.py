@@ -136,7 +136,7 @@ def _episode_geometry(payload):
         G_mmap = np.load(g_path, mmap_mode="r+")
         env.seed(zlib.crc32(f"{Path(suite_dir).name}#ep{ep_index}".encode("utf-8")))
         env.reset()
-        env.set_init_state(np.asarray(match["init"], dtype=float).flatten())
+        env.set_init_state(np.asarray(init_states[match["init"]], dtype=float).flatten())
         env.sim.forward()
         n_valid = _replay_geometry(env, actions, layout, G_mmap, row0)
         G_mmap.flush()
