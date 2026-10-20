@@ -27,6 +27,7 @@ import json
 import multiprocessing
 import traceback
 import zlib
+from contextlib import suppress
 from pathlib import Path
 
 import numpy as np
@@ -113,9 +114,8 @@ def _get_env(dataset_dir, task, camera):
         _ENV_CACHE[key] = (env, np.asarray(bench.get_task_init_states(task_id), dtype=float))
         if len(_ENV_CACHE) > _ENV_CACHE_MAX:
             stale_env, _ = _ENV_CACHE.pop(next(iter(_ENV_CACHE)))
-            close = getattr(stale_env, "close", None)
-            if callable(close):
-                close()
+            with suppress(Exception):  # EGL context free can raise at teardown; eviction must not kill the worker
+                stale_env.close()
     return _ENV_CACHE[key]
 
 
