@@ -83,19 +83,36 @@ def calibrate(ratios, anchor_arm, anchor_lambda):
     return {arm: rho / r for arm, r in ratios.items()}
 
 
+def oe_batch_stats(examples):
+    """(invalid fraction, max |G|) for one microbatch -- the arm's own health report.
+
+    Every training sample whose base_index sits in the last chunk-1 steps has no cache
+    row and arrives invalid by design; a fraction near 1.0 instead means the cache and
+    the sampler disagree about episode lengths.
+    """
+    payload = [ex["oe"] for ex in examples]
+    invalid = float(np.mean([not ex["valid"] for ex in payload]))
+    finite = [np.abs(np.asarray(ex["G"], dtype=np.float32)) for ex in payload if ex["valid"]]
+    max_abs = float(np.max(np.concatenate([x.ravel() for x in finite]))) if finite else float("nan")
+    return invalid, max_abs
+
+
 def measure_arm(model, loader, mode, batches, params):
-    """Set the arm's metric, replay the fixed sample prefix, return the per-batch ratios."""
+    """Set the arm's metric, replay the fixed sample prefix, return ratios + health."""
     model.oe_mode = mode
     device = next(model.parameters()).device
-    ratios = []
+    ratios, invalid, g_max = [], [], []
     for index, examples in enumerate(loader):
         if index >= batches:
             break
         _check_preprocessed(examples)
+        sta = oe_batch_stats(examples)
+        invalid.append(sta[0])
+        g_max.append(sta[1])
         ratios.append(oe_gradient_ratio(model, _to_device(examples, device), params))
     if not ratios:
         raise RuntimeError("dataloader produced no batches")
-    return ratios
+    return ratios, float(np.mean(invalid)), float(np.nanmax(g_max))
 
 
 def main():
@@ -151,11 +168,11 @@ def main():
     for name, path in arms:
         mode = OmegaConf.load(path).framework.oe.mode
         modes[name] = mode
-        samples = measure_arm(model, loader, mode, args.batches, params)
+        samples, invalid, g_max = measure_arm(model, loader, mode, args.batches, params)
         ratios[name] = float(np.mean(samples))
         print(
             f"[calib] {name:<12} mode={mode:<11} r={ratios[name]:.4f}"
-            f"  (std {np.std(samples):.4f} over {len(samples)} batches)"
+            f"  (std {np.std(samples):.4f}, invalid {invalid:.3f}, max|G| {g_max:.3g})"
         )
 
     lambdas = calibrate(ratios, args.anchor_arm, args.anchor_lambda)

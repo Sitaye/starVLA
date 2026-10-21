@@ -46,6 +46,16 @@ class _SumOfTwoTerms(torch.nn.Module):
         return {"total_loss": base + self.oe_loss_weight * aux}
 
 
+def _oe_payload(valid=True, g=None):
+    """Minimal per-sample OE payload; batch element shape follows the real attach contract."""
+    g = np.full((3, 3), np.nan) if not valid else (np.eye(3) if g is None else np.asarray(g))
+    return {"G": g, "valid": valid, "half_range": np.ones(2), "task_mean": np.eye(3), "trace_mean": 1.0}
+
+
+def _batch(*valid):
+    return [{"qwen_inputs": {}, "oe": _oe_payload(v)} for v in (valid or (True,))]
+
+
 def test_flat_grad_counts_unused_params_as_zero():
     model = _SumOfTwoTerms()
     unused = torch.nn.Parameter(torch.tensor([5.0]))
@@ -63,17 +73,18 @@ def test_gradient_ratio_recovers_aux_from_toggled_objective():
 
 def test_measure_arm_sets_mode_and_averages_batches():
     model = _SumOfTwoTerms()
-    loader = [[{"qwen_inputs": {}}], [{"qwen_inputs": {}}]]
-    ratios = CAL.measure_arm(model, loader, "diag", batches=2, params=list(model.parameters()))
+    loader = [_batch(), _batch()]
+    ratios, invalid, g_max = CAL.measure_arm(model, loader, "diag", batches=2, params=list(model.parameters()))
     assert model.oe_mode == "diag"
     assert len(ratios) == 2
+    assert invalid == 0.0 and g_max == pytest.approx(1.0)
     assert ratios[0] == pytest.approx(ratios[1])
 
 
 def test_measure_arm_respects_batch_budget():
     model = _SumOfTwoTerms()
-    loader = [[{"qwen_inputs": {}}]] * 5
-    ratios = CAL.measure_arm(model, loader, "full", batches=2, params=list(model.parameters()))
+    loader = [_batch()] * 5
+    ratios, _, _ = CAL.measure_arm(model, loader, "full", batches=2, params=list(model.parameters()))
     assert len(ratios) == 2
 
 
@@ -81,3 +92,12 @@ def test_measure_arm_rejects_empty_stream():
     model = _SumOfTwoTerms()
     with pytest.raises(RuntimeError, match="no batches"):
         CAL.measure_arm(model, [], "full", batches=2, params=list(model.parameters()))
+
+
+def test_batch_stats_report_the_invalid_fraction():
+    """Tail steps (base_index in the last chunk-1) arrive invalid; the arm must say so."""
+    invalid, g_max = CAL.oe_batch_stats(_batch(True, False, True, False))
+    assert invalid == pytest.approx(0.5)
+    assert g_max == pytest.approx(1.0)
+    all_bad, g_bad = CAL.oe_batch_stats(_batch(False, False))
+    assert all_bad == 1.0 and np.isnan(g_bad)
