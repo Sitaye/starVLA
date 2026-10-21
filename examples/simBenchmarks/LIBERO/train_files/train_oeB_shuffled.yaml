@@ -16,7 +16,7 @@ framework:
   oe:
     mode: shuffled
     # pairing control for `full`: same calibrated dose
-    loss_weight: 0.559990
+    loss_weight: 0.559309
   action_model:
     action_dim: 7
     state_dim: 7

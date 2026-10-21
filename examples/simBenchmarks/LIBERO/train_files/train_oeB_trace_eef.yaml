@@ -15,8 +15,8 @@ framework:
     preprocess_in_dataloader: true
   oe:
     mode: trace_eef
-    # lambda* from the gradient calibration (design doc 6.10)
-    loss_weight: 4.675514
+    # lambda* from the gradient calibration (design doc 6.13)
+    loss_weight: 6.136637
   action_model:
     action_dim: 7
     state_dim: 7

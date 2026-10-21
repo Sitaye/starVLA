@@ -15,7 +15,7 @@ framework:
     preprocess_in_dataloader: true
   oe:
     mode: task_fixed
-    # lambda* from the gradient calibration (design doc 6.10)
+    # lambda* from the gradient calibration (design doc 6.13)
     loss_weight: 0.560000
   action_model:
     action_dim: 7
