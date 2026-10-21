@@ -26,7 +26,9 @@ Instrument check: the recomputed L1 on the first batch is reported next to the m
 own ``pure_action_loss`` on that same batch — the trainer logs that exact number, so
 the two must agree to float precision.
 
-Usage (cluster, GPU):
+Usage (cluster, GPU) — must run in the **StarVLA training environment** (torch,
+transformers, accelerate, omegaconf, pyav); it never touches robosuite, so it does
+not belong in the LIBERO eval environment, which has no accelerate:
     python -m starVLA.analysis.oevla.probe_policy_dims \
         --config-yaml examples/simBenchmarks/LIBERO/train_files/train_oeB_baseline.yaml \
         --ckpt baseline=.../steps_10000_pytorch_model.pt \
