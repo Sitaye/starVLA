@@ -112,7 +112,45 @@ def _run(mode, payload):
 
 
 def test_oe_modes_registry():
-    assert OE_MODES == ("task_fixed", "trace", "diag", "full", "shuffled")
+    assert OE_MODES == ("task_fixed", "trace", "diag", "full", "shuffled", "trace_norm", "trace_eef")
+
+
+def _e_norm_wide(chunk=CHUNK, act=7):
+    """Chunked action error with a live gripper channel (cell index 6 of every step)."""
+    rng = np.random.default_rng(7)
+    return rng.normal(size=(2, chunk * act))
+
+
+def test_trace_norm_is_normalized_identity():
+    """trace_norm is W = I (mean diagonal 1) in the normalized space, all cells."""
+    e = _e_norm_wide()
+    payload = [dict(ex, valid=True) for ex in _payload(np.kron(np.eye(CHUNK), np.array([[4.0, 1.0], [1.0, 2.0]])))]
+    loss, valid_frac = oe_quadratic(payload, torch.tensor(e, dtype=torch.float32), "trace_norm", CHUNK)
+    np.testing.assert_allclose(float(loss), float((e**2).sum(-1).mean()), rtol=1e-5)
+    assert valid_frac == pytest.approx(1.0)
+
+
+def test_trace_eef_masks_gripper_and_keeps_scale():
+    """trace_eef drops the gripper cells and renormalises to mean diagonal 1."""
+    chunk, act = CHUNK, 7
+    d_total = chunk * act
+    e = _e_norm_wide(chunk, act)
+    payload = [dict(ex, valid=True) for ex in _payload(np.kron(np.eye(CHUNK), np.array([[4.0, 1.0], [1.0, 2.0]])))]
+    loss, _ = oe_quadratic(payload, torch.tensor(e, dtype=torch.float32), "trace_eef", chunk)
+    keep = np.arange(d_total) % act != OE_LOSS.GRIPPER_IDX
+    expected = ((e**2)[:, keep].sum(-1) * d_total / keep.sum()).mean()
+    np.testing.assert_allclose(float(loss), float(expected), rtol=1e-5)
+    # a pure gripper perturbation must not move the term at all
+    e_grip = e.copy()
+    e_grip[:, OE_LOSS.GRIPPER_IDX :: act] += 5.0
+    loss_grip, _ = oe_quadratic(payload, torch.tensor(e_grip, dtype=torch.float32), "trace_eef", chunk)
+    assert float(loss_grip) == pytest.approx(float(loss), rel=1e-6)
+    # mean diagonal 1: an all-ones error costs exactly d_total per sample
+    ones = torch.ones((1, d_total))
+    loss_ones, _ = oe_quadratic(payload[:1], ones, "trace_eef", chunk)
+    assert float(loss_ones) == pytest.approx(float(d_total), rel=1e-5)
+    loss_ones_norm, _ = oe_quadratic(payload[:1], ones, "trace_norm", chunk)
+    assert float(loss_ones_norm) == pytest.approx(float(d_total), rel=1e-5)
 
 
 def test_full_arm_matches_manual(payload):
@@ -157,7 +195,7 @@ def test_all_invalid_is_zero():
     task_mean = np.kron(np.eye(CHUNK), np.array([[1.5, 0.25], [0.25, 1.0]]))
     payload = _payload(step_g, task_mean=task_mean)
     payload = [dict(ex, valid=False, G=np.full((D, D), np.nan, dtype=np.float32)) for ex in payload]
-    for mode in ("task_fixed", "trace", "diag", "full", "shuffled"):
+    for mode in OE_MODES:
         loss, valid_frac = _run(mode, payload)
         assert loss == 0.0
         assert valid_frac == 0.0
