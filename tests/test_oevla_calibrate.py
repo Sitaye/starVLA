@@ -94,9 +94,10 @@ def test_gradient_ratio_fails_loud_on_nan_aux():
 def test_measure_arm_takes_the_ratio_of_the_step_gradient():
     """Identical batches: summing then dividing equals the single-batch ratio."""
     model = _SumOfTwoTerms()
-    loader = [_batch(), _batch()]
-    ratio, invalid, g_max = CAL.measure_arm(model, loader, batches=2, params=list(model.parameters()))
-    assert ratio == pytest.approx(np.sqrt(20) / np.sqrt(2), rel=1e-6)
+    loader = [_batch()] * 4  # two windows of two microbatches
+    ratios, invalid, g_max = CAL.measure_arm(model, loader, batches=2, windows=2, params=list(model.parameters()))
+    assert len(ratios) == 2  # two disjoint one-step windows
+    assert np.mean(ratios) == pytest.approx(np.sqrt(20) / np.sqrt(2), rel=1e-6)
     assert invalid == 0.0 and g_max == pytest.approx(1.0)
 
 
@@ -118,8 +119,8 @@ def test_measure_arm_cancels_incoherent_aux_noise():
             return {"total_loss": self.w.abs().sum() + self.oe_loss_weight * phase * self.w.square().sum()}
 
     model = _Alternating()
-    ratio, _, _ = CAL.measure_arm(model, [_batch(), _batch()], batches=2, params=list(model.parameters()))
-    assert ratio < 1e-6
+    ratios, _, _ = CAL.measure_arm(model, [_batch(), _batch()], batches=2, windows=1, params=list(model.parameters()))
+    assert ratios[0] < 1e-6
 
 
 def test_measure_arm_respects_batch_budget():
@@ -133,14 +134,14 @@ def test_measure_arm_respects_batch_budget():
             return super().forward()
 
     model = _Counter()
-    CAL.measure_arm(model, [_batch()] * 5, batches=2, params=list(model.parameters()))
-    assert model.calls == 4  # two batches x two weight passes
+    CAL.measure_arm(model, [_batch()] * 5, batches=2, windows=2, params=list(model.parameters()))
+    assert model.calls == 8  # 2 weight passes x 2 microbatches x 2 windows
 
 
 def test_measure_arm_rejects_empty_stream():
     model = _SumOfTwoTerms()
     with pytest.raises(RuntimeError, match="no batches"):
-        CAL.measure_arm(model, [], batches=2, params=list(model.parameters()))
+        CAL.measure_arm(model, [], batches=2, windows=2, params=list(model.parameters()))
 
 
 def test_batch_stats_report_the_invalid_fraction():

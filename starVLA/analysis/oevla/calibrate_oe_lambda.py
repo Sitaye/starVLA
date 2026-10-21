@@ -124,25 +124,38 @@ def oe_batch_stats(examples):
     return invalid, max_abs
 
 
-def measure_arm(model, loader, batches, params):
-    """Replay the fixed sample prefix; return (step gradient ratio, invalid frac, max |G|)."""
+def measure_arm(model, loader, batches, windows, params):
+    """Replay one-step windows; return (per-window step ratios, invalid frac, max |G|).
+
+    Each window sums ``batches`` microbatches, i.e. one training step's worth of samples, so
+    every element is an estimate of the ratio the optimizer actually sees. The windows use
+    disjoint parts of the deterministic stream, which is the only way to get an error bar:
+    the stream is fixed per (epoch, index, seed), so two runs of the script return exactly
+    the same number and a single window would hide its own sampling error.
+    """
     device = next(model.parameters()).device
-    g_bc = g_oe = None
-    invalid, g_max = [], []
-    for index, examples in enumerate(loader):
-        if index >= batches:
+    stream = iter(loader)
+    ratios, invalid, g_max = [], [], []
+    for _ in range(windows):
+        g_bc = g_oe = None
+        for _ in range(batches):
+            try:
+                examples = next(stream)
+            except StopIteration:
+                break
+            check_preprocessed(examples)
+            sta = oe_batch_stats(examples)
+            invalid.append(sta[0])
+            g_max.append(sta[1])
+            bc, oe = oe_gradients(model, to_device(examples, device), params)
+            g_bc = bc if g_bc is None else g_bc + bc
+            g_oe = oe if g_oe is None else g_oe + oe
+        if g_bc is None:
             break
-        check_preprocessed(examples)
-        sta = oe_batch_stats(examples)
-        invalid.append(sta[0])
-        g_max.append(sta[1])
-        bc, oe = oe_gradients(model, to_device(examples, device), params)
-        g_bc = bc if g_bc is None else g_bc + bc
-        g_oe = oe if g_oe is None else g_oe + oe
-    if g_bc is None:
+        ratios.append(float(np.linalg.norm(g_oe) / max(np.linalg.norm(g_bc), 1e-12)))
+    if not ratios:
         raise RuntimeError("dataloader produced no batches")
-    ratio = float(np.linalg.norm(g_oe) / max(np.linalg.norm(g_bc), 1e-12))
-    return ratio, float(np.mean(invalid)), float(np.nanmax(g_max))
+    return ratios, float(np.mean(invalid)), float(np.nanmax(g_max))
 
 
 def main():
@@ -155,7 +168,13 @@ def main():
     parser.add_argument(
         "--anchor-lambda", type=float, default=0.56, help="that arm's historical lambda, mean-over-cells units"
     )
-    parser.add_argument("--batches", type=int, default=8, help="microbatches averaged over")
+    parser.add_argument(
+        "--batches",
+        type=int,
+        default=8,
+        help="microbatches per window; must add up to ONE training step (16 per rank x 8 ranks = 128 -> 8)",
+    )
+    parser.add_argument("--windows", type=int, default=4, help="disjoint one-step windows averaged for the error bar")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
@@ -174,16 +193,19 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    modes, ratios = {}, {}
+    modes, ratios, per_window_sem = {}, {}, {}
     for name, path in arms:
         model, loader = build_policy(path, out_dir, args.device)  # arm == its own YAML
         load_checkpoint(model, args.ckpt)
         params = [p for p in model.parameters() if p.requires_grad]
         modes[name] = model.oe_mode
-        ratios[name], invalid, g_max = measure_arm(model, loader, args.batches, params)
+        per_window, invalid, g_max = measure_arm(model, loader, args.batches, args.windows, params)
+        ratios[name] = float(np.mean(per_window))
+        spread = np.std(per_window, ddof=1) if len(per_window) > 1 else 0.0
+        per_window_sem[name] = float(spread / np.sqrt(len(per_window)))
         print(
-            f"[calib] {name:<12} mode={modes[name]:<11} r={ratios[name]:.4f}"
-            f"  (invalid {invalid:.3f}, max|G| {g_max:.3g})"
+            f"[calib] {name:<12} mode={modes[name]:<11} r={ratios[name]:.4f} +/- {per_window_sem[name]:.4f}"
+            f"  ({len(per_window)} step-window(s), invalid {invalid:.3f}, max|G| {g_max:.3g})"
         )
         del model, loader
         gc.collect()
@@ -204,11 +226,17 @@ def main():
     payload = {
         "checkpoint": str(args.ckpt),
         "batches": args.batches,
+        "windows": args.windows,
         "anchor_arm": args.anchor_arm,
         "anchor_lambda": args.anchor_lambda,
         "target_ratio": rho,
         "arms": {
-            name: {"mode": modes[name], "grad_ratio_at_lambda_1": ratios[name], "lambda": lambdas[name]}
+            name: {
+                "mode": modes[name],
+                "grad_ratio_at_lambda_1": ratios[name],
+                "grad_ratio_sem": per_window_sem[name],
+                "lambda": lambdas[name],
+            }
             for name, _ in arms
         },
     }
