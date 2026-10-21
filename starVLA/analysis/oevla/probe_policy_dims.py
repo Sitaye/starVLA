@@ -38,6 +38,7 @@ not belong in the LIBERO eval environment, which has no accelerate:
 
 import argparse
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -142,15 +143,32 @@ def _to_device(obj, device):
     """Recursively move tensors to ``device`` — what accelerate's dataloader does during training.
 
     ``predict_action``/``forward`` consume ``examples[0]["qwen_inputs"]`` as handed to them, so
-    without accelerate (no DataLoaderShard) the nested tensors would stay on the CPU.
+    without accelerate (no DataLoaderShard) the nested tensors would stay on the CPU. The
+    processor returns a ``BatchFeature`` (a ``UserDict``), which is a Mapping but *not* a dict,
+    hence the Mapping branch rather than an isinstance(obj, dict) one.
     """
     if isinstance(obj, torch.Tensor):
         return obj.to(device, non_blocking=True)
-    if isinstance(obj, dict):
-        return {k: _to_device(v, device) for k, v in obj.items()}
+    if isinstance(obj, Mapping):
+        moved = {k: _to_device(v, device) for k, v in obj.items()}
+        if type(obj) is dict:
+            return moved
+        try:
+            return type(obj)(moved)
+        except TypeError:
+            return moved
     if isinstance(obj, (list, tuple)):
         return type(obj)(_to_device(v, device) for v in obj)
     return obj
+
+
+def _check_preprocessed(examples):
+    """The collate must have built qwen_inputs; otherwise predict_action builds them on the CPU."""
+    if "qwen_inputs" not in examples[0]:
+        raise SystemExit(
+            "the loader did not preprocess qwen_inputs — set framework.qwenvl.preprocess_in_dataloader: true "
+            "in the arm YAML (the training path relies on it too)"
+        )
 
 
 def collect(model, loader, batches):
@@ -161,6 +179,7 @@ def collect(model, loader, batches):
     for index, examples in enumerate(loader):
         if index >= batches:
             break
+        _check_preprocessed(examples)
         out = model.predict_action(examples=_to_device(examples, device))
         preds.append(np.asarray(out["normalized_actions"], dtype=np.float64))
         targets.append(np.asarray([np.asarray(ex["action"]) for ex in examples], dtype=np.float64)[:, -horizon:])
