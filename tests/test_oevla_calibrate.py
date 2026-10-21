@@ -63,12 +63,13 @@ def test_flat_grad_counts_unused_params_as_zero():
     np.testing.assert_allclose(g, [1.0, 1.0, 0.0], atol=1e-6)
 
 
-def test_gradient_ratio_recovers_aux_from_toggled_objective():
+def test_gradients_recover_aux_from_toggled_objective():
     model = _SumOfTwoTerms()
-    ratio = CAL.oe_gradient_ratio(model, None, list(model.parameters()))
-    # ||grad L_OE|| = ||(2, 4)|| = sqrt(20); ||grad L_BC|| = ||(1, 1)|| = sqrt(2)
-    assert ratio == pytest.approx(np.sqrt(20) / np.sqrt(2), rel=1e-6)
-    assert model.oe_loss_weight == 1.0  # left enabled after the measurement pass
+    model.oe_loss_weight = 0.25
+    g_bc, g_oe = CAL.oe_gradients(model, None, list(model.parameters()))
+    np.testing.assert_allclose(g_bc, [1.0, 1.0], atol=1e-6)  # grad |w|_1 = sign(w)
+    np.testing.assert_allclose(g_oe, [2.0, 4.0], atol=1e-6)  # grad |w|_2^2 = 2w
+    assert model.oe_loss_weight == 0.25  # the arm's own weight is restored
 
 
 class _NaNOnAux(torch.nn.Module):
@@ -87,30 +88,59 @@ class _NaNOnAux(torch.nn.Module):
 def test_gradient_ratio_fails_loud_on_nan_aux():
     model = _NaNOnAux()
     with pytest.raises(RuntimeError, match="non-finite gradient"):
-        CAL.oe_gradient_ratio(model, None, list(model.parameters()))
+        CAL.oe_gradients(model, None, list(model.parameters()))
 
 
-def test_measure_arm_sets_mode_and_averages_batches():
+def test_measure_arm_takes_the_ratio_of_the_step_gradient():
+    """Identical batches: summing then dividing equals the single-batch ratio."""
     model = _SumOfTwoTerms()
     loader = [_batch(), _batch()]
-    ratios, invalid, g_max = CAL.measure_arm(model, loader, "diag", batches=2, params=list(model.parameters()))
-    assert model.oe_mode == "diag"
-    assert len(ratios) == 2
+    ratio, invalid, g_max = CAL.measure_arm(model, loader, batches=2, params=list(model.parameters()))
+    assert ratio == pytest.approx(np.sqrt(20) / np.sqrt(2), rel=1e-6)
     assert invalid == 0.0 and g_max == pytest.approx(1.0)
-    assert ratios[0] == pytest.approx(ratios[1])
+
+
+def test_measure_arm_cancels_incoherent_aux_noise():
+    """The trainer steps the *summed* gradient: per-microbatch OE noise must cancel.
+
+    Averaging per-microbatch ratios would report ~2.0 here even though the OE term
+    contributes nothing to the step, which is how the noisy arms got under-dosed.
+    """
+
+    class _Alternating(_SumOfTwoTerms):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, examples=None):
+            phase = -1.0 if (self.calls // 2) % 2 else 1.0  # one phase per microbatch
+            self.calls += 1
+            return {"total_loss": self.w.abs().sum() + self.oe_loss_weight * phase * self.w.square().sum()}
+
+    model = _Alternating()
+    ratio, _, _ = CAL.measure_arm(model, [_batch(), _batch()], batches=2, params=list(model.parameters()))
+    assert ratio < 1e-6
 
 
 def test_measure_arm_respects_batch_budget():
-    model = _SumOfTwoTerms()
-    loader = [_batch()] * 5
-    ratios, _, _ = CAL.measure_arm(model, loader, "full", batches=2, params=list(model.parameters()))
-    assert len(ratios) == 2
+    class _Counter(_SumOfTwoTerms):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, examples=None):
+            self.calls += 1
+            return super().forward()
+
+    model = _Counter()
+    CAL.measure_arm(model, [_batch()] * 5, batches=2, params=list(model.parameters()))
+    assert model.calls == 4  # two batches x two weight passes
 
 
 def test_measure_arm_rejects_empty_stream():
     model = _SumOfTwoTerms()
     with pytest.raises(RuntimeError, match="no batches"):
-        CAL.measure_arm(model, [], "full", batches=2, params=list(model.parameters()))
+        CAL.measure_arm(model, [], batches=2, params=list(model.parameters()))
 
 
 def test_batch_stats_report_the_invalid_fraction():

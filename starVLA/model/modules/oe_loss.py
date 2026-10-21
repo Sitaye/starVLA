@@ -35,9 +35,15 @@ cell support and a mean diagonal of 1.
 
 Every mode is normalized to a **mean over cells** (not a sum): the base loss is an L1
 mean over the same cells, so λ stays a dimensionless weight relative to it, and stays
-comparable across arms and chunk lengths. A sum would make the auxiliary term D times
-larger than its nominal λ, which is how the first three rounds stayed at or above
-parity with the base loss even at λ = 0.01.
+comparable across chunk lengths. A sum would make the auxiliary term D times larger
+than its nominal λ, which is how the first three rounds stayed at or above parity with
+the base loss even at λ = 0.01.
+
+The convention fixes the units, not the magnitude: ``trace`` runs in raw units with the
+per-state scale kept (~half_range² times the unit-mean arms) and ``trace_eef`` runs in
+normalized units. λ is therefore **not** numerically comparable across modes; each arm is
+dosed by gradient calibration (design doc 6.10), which equalizes the achieved dose
+instead of the nominal weight.
 
 Invalid transitions (NaN G rows, unmatched episodes) drop out of the OE term
 only — the sample stays in the batch with the base loss untouched, keeping
@@ -64,7 +70,9 @@ def oe_quadratic(payload, e_norm, mode, chunk_len):
         if d_total % chunk_len:
             raise ValueError(f"action error width {d_total} is not a multiple of chunk_len {chunk_len}")
         keep = torch.arange(d_total, device=e_norm.device) % (d_total // chunk_len) != GRIPPER_IDX
-        quad = e_norm.square()[:, keep].mean(-1)
+        # Same cell count as the G-family arms (gripper cells contribute exact zero), so the
+        # mean-over-cells convention is identical across every mode.
+        quad = e_norm.square()[:, keep].sum(-1) / d_total
     else:
         e_raw = e_norm * torch.as_tensor(
             np.stack([np.tile(np.asarray(ex["half_range"], dtype=np.float32), chunk_len) for ex in payload]),
@@ -94,5 +102,9 @@ def oe_quadratic(payload, e_norm, mode, chunk_len):
             G_eff = G_raw / c.unsqueeze(-1)  # [B, d, d]
         quad = torch.einsum("bi,bij,bj->b", e_raw, G_eff, e_raw) / d_total
     quad = torch.where(valid, quad, torch.zeros_like(quad))
-    oe_loss = quad.sum() / valid.float().sum().clamp(min=1.0)
+    # Mean over the batch, not over the valid rows: a sample without a geometry row still
+    # carries weight 1 in the base L1, so it must carry the same weight here (invalid rows
+    # contribute exact zero). Dividing by n_valid instead would scale every arm's effective
+    # dose by B/n_valid, i.e. by the dataset's episode-length distribution.
+    oe_loss = quad.sum() / max(len(payload), 1)
     return oe_loss, valid.float().mean().detach()

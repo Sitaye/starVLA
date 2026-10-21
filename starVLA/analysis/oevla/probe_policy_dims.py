@@ -38,11 +38,12 @@ not belong in the LIBERO eval environment, which has no accelerate:
 
 import argparse
 import json
-from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 import torch
+
+from starVLA.analysis.oevla.policy_io import build_policy, check_preprocessed, load_checkpoint, to_device
 
 GRIPPER_IDX = 6
 CLOSE_THRESHOLD = 0.5  # deployment threshold on the binary gripper channel
@@ -124,62 +125,6 @@ def summarize(pred, target):
     return result
 
 
-def _load_state_dict(path):
-    path = str(path)
-    if path.endswith(".safetensors"):
-        from safetensors.torch import load_file
-
-        state = load_file(path)
-    else:
-        state = torch.load(path, map_location="cpu", weights_only=True)
-    if isinstance(state, dict) and isinstance(state.get("state_dict"), dict):
-        state = state["state_dict"]
-    if not isinstance(state, dict) or not state:
-        raise ValueError(f"{path}: not a state dict")
-    prefixed = sum(key.startswith("module.") for key in state)
-    if prefixed and prefixed >= len(state) // 2:
-        state = {key[len("module.") :] if key.startswith("module.") else key: value for key, value in state.items()}
-    return state
-
-
-def _load_into(model, state, label):
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    if missing:
-        raise ValueError(f"{label}: {len(missing)} missing keys, e.g. {list(missing)[:5]}")
-    if unexpected:
-        raise ValueError(f"{label}: {len(unexpected)} unexpected keys, e.g. {list(unexpected)[:5]}")
-
-
-def _to_device(obj, device):
-    """Recursively move tensors to ``device`` — what accelerate's dataloader does during training.
-
-    ``predict_action``/``forward`` consume ``examples[0]["qwen_inputs"]`` as handed to them, so
-    without accelerate (no DataLoaderShard) the nested tensors would stay on the CPU. The
-    processor returns a ``BatchFeature`` (a ``UserDict``), which is a Mapping but *not* a dict,
-    hence the Mapping branch rather than an isinstance(obj, dict) one.
-    """
-    if isinstance(obj, torch.Tensor):
-        return obj.to(device, non_blocking=True)
-    if isinstance(obj, Mapping):
-        moved = {k: _to_device(v, device) for k, v in obj.items()}
-        if type(obj) is dict:
-            return moved
-        try:
-            return type(obj)(moved)
-        except TypeError:
-            return moved
-    if isinstance(obj, (list, tuple)):
-        return type(obj)(_to_device(v, device) for v in obj)
-    return obj
-
-
-def _check_preprocessed(examples):
-    """The collate must have built qwen_inputs; otherwise predict_action builds them on the CPU."""
-    if "qwen_inputs" not in examples[0]:
-        raise SystemExit(
-            "the loader did not preprocess qwen_inputs — set framework.qwenvl.preprocess_in_dataloader: true "
-            "in the arm YAML (the training path relies on it too)"
-        )
 
 
 def collect(model, loader, batches):
@@ -190,8 +135,8 @@ def collect(model, loader, batches):
     for index, examples in enumerate(loader):
         if index >= batches:
             break
-        _check_preprocessed(examples)
-        out = model.predict_action(examples=_to_device(examples, device))
+        check_preprocessed(examples)
+        out = model.predict_action(examples=to_device(examples, device))
         preds.append(np.asarray(out["normalized_actions"], dtype=np.float64))
         targets.append(np.asarray([np.asarray(ex["action"]) for ex in examples], dtype=np.float64)[:, -horizon:])
     if not preds:
@@ -202,7 +147,7 @@ def collect(model, loader, batches):
 def check_instrument(model, examples):
     """Reproduce the trainer's ``pure_action_loss`` on one batch (self-check)."""
     device = next(model.parameters()).device
-    batch = _to_device(examples, device)
+    batch = to_device(examples, device)
     with torch.no_grad():
         own = float(model(examples=batch)["pure_action_loss"])
     horizon = int(model.action_horizon)
@@ -267,28 +212,12 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    from omegaconf import OmegaConf
-
-    from starVLA.dataloader import build_dataloader
-    from starVLA.model.framework.base_framework import build_framework
-    from starVLA.model.framework.share_tools import apply_config_compat
-
-    cfg = apply_config_compat(OmegaConf.load(args.config_yaml))
-    cfg.output_dir = str(out_dir)  # build_dataloader writes dataset statistics here
-
-    model = build_framework(cfg)
-    model.to(args.device)
-    model.eval()
-
-    loader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
-    dataset = getattr(loader, "dataset", None)
-    if dataset is not None and callable(getattr(dataset, "set_epoch", None)):
-        dataset.set_epoch(0)
+    model, loader = build_policy(args.config_yaml, out_dir, args.device)
 
     results = {}
     first_batch = next(iter(loader))
     for label, path in ckpts:
-        _load_into(model, _load_state_dict(path), label)
+        load_checkpoint(model, path)
         pred, target = collect(model, loader, args.batches)
         results[label] = summarize(pred, target)
         results[label]["checkpoint"] = path

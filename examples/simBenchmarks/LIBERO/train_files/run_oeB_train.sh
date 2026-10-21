@@ -9,21 +9,25 @@ freeze_module_list=''
 base_vlm=/defaultShare/archive/linpenghan/models/Qwen3.5-0.8B/
 ARM=${1:-}
 LAMBDA=${2:-}
-if [ -z "${ARM}" ] || [ -z "${LAMBDA}" ]; then
-  echo "usage: bash run_oeB_train.sh <arm> <lambda>  # arms: baseline taskfixed trace trace_eef diag full shuffled" >&2
+if [ -z "${ARM}" ]; then
+  echo "usage: bash run_oeB_train.sh <arm> [lambda]  # arms: baseline taskfixed trace trace_eef diag full shuffled" >&2
   exit 2
 fi
-# lambda_OE comes from calibrate_oe_lambda.py (bar/oe_calibration/calibration.json):
-# it is a mean-over-cells weight, so it is comparable across arms.
 case ${ARM} in
   baseline|taskfixed|trace|trace_eef|diag|full|shuffled) ;;
-  *) echo "unknown arm ${ARM}; see calibrate_oe_lambda.py and train_oeB_*.yaml" >&2; exit 2 ;;
+  *) echo "unknown arm ${ARM}; see train_oeB_${ARM}.yaml" >&2; exit 2 ;;
 esac
 config_yaml=./examples/simBenchmarks/LIBERO/train_files/train_oeB_${ARM}.yaml
-# baseline is the plain-BC reference: it must not receive framework.oe at all, since an
-# override under a missing key would create the section (mode defaults to "full").
+# lambda_OE is calibrated per arm by calibrate_oe_lambda.py and already written into the arm
+# YAML, which is the single source of truth; the optional second argument only overrides it.
+# baseline must never receive framework.oe: an override under a missing key would create the
+# section, and the model now refuses to build one without an explicit mode and weight.
 oe_args=()
-if [ "${ARM}" != baseline ]; then
+if [ -n "${LAMBDA}" ]; then
+  if [ "${ARM}" = baseline ]; then
+    echo "baseline takes no lambda (it has no framework.oe section)" >&2
+    exit 2
+  fi
   oe_args+=(--framework.oe.loss_weight "${LAMBDA}")
 fi
 libero_data_root=/defaultShare/pubdata/OXE_LEROBOT_DATASET/libero_no_noops_1.0.0_lerobot/

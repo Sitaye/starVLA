@@ -21,18 +21,31 @@ quantity that actually competes with the base loss — the parameter-gradient ra
     r_arm(lambda) = ||d L_OE / d theta|| / ||d L_BC / d theta||  =  lambda * r_arm(1)
 
 since the two terms add, and solves lambda_arm = rho / r_arm(1) for a target ratio rho.
+
+r_arm is measured on the *step* gradient: the per-microbatch gradients are summed over
+the replay before the norms are taken, because training sums them too (8 ranks x 16
+samples, ZeRO-2 with gradient_accumulation_steps 1). Averaging per-microbatch ratios
+instead would inflate r by the incoherent part of the OE gradient — most for the noisiest
+arm — and systematically under-dose the arms being compared.
+
+The sample count matters for the same reason: the coherent part of the base gradient grows
+~N while the incoherent part of the OE gradient grows ~sqrt(N), so r is only *the training
+step's* ratio when N matches one step. With per_device_batch_size 16 and 8 ranks that is
+128 samples, i.e. --batches 8 on a single process; scaling --batches scales r.
 rho is anchored on the one arm with a positive closed-loop result (taskfixed, which at
 the pre-normalisation lambda = 0.01 — i.e. 0.01 * 56 = 0.56 once the loss is a mean over
 cells rather than a sum — reached 97.2%), so the re-run asks whether *structure* matters
 at a dose that is known not to destroy the policy.
 
-Zero training: one model, a fixed sample stream, two forwards and two autograd.grad
-calls per microbatch. Run it in the StarVLA training environment (torch, transformers,
+Zero training: a fixed sample stream, two forwards and two autograd.grad calls per
+microbatch. Each arm gets its own framework built from its own YAML, because the arm is
+just as much `datasets.vla_data.oe_shuffle` (the shuffled control) as it is
+`framework.oe.mode`; measuring every arm on one dataloader would silently turn the
+pairing control into a copy of `full`. Run it in the StarVLA training environment (torch, transformers,
 accelerate, omegaconf, pyav); it never touches robosuite.
 
 Usage (cluster, GPU):
     python -m starVLA.analysis.oevla.calibrate_oe_lambda \
-        --config-yaml examples/simBenchmarks/LIBERO/train_files/train_oeB_baseline.yaml \
         --ckpt /path/to/steps_10000_pytorch_model.pt \
         --arm taskfixed=examples/simBenchmarks/LIBERO/train_files/train_oeB_taskfixed.yaml \
         --arm trace_eef=.../train_oeB_trace_eef.yaml \
@@ -43,13 +56,14 @@ Usage (cluster, GPU):
 """
 
 import argparse
+import gc
 import json
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from starVLA.analysis.oevla.probe_policy_dims import _check_preprocessed, _load_into, _load_state_dict, _to_device
+from starVLA.analysis.oevla.policy_io import build_policy, check_preprocessed, load_checkpoint, to_device
 
 
 def _flat_grad(loss, params):
@@ -62,18 +76,20 @@ def _flat_grad(loss, params):
     return np.concatenate(blocks)
 
 
-def oe_gradient_ratio(model, examples, params):
-    """||d L_OE / d theta|| / ||d L_BC / d theta|| for one microbatch.
+def oe_gradients(model, examples, params):
+    """(grad L_BC, grad L_OE) for one microbatch, as flat float64 vectors.
 
     The two terms are read off one additive objective by toggling the weight: the
     lambda = 1 pass yields grad(L_BC + L_OE) and the lambda = 0 pass grad(L_BC), so
     the difference is exactly grad(L_OE) even though the framework reports the OE
-    term detached.
+    term detached. The arm's own weight is restored afterwards.
     """
+    keep = model.oe_loss_weight
     model.oe_loss_weight = 0.0
     g_bc = _flat_grad(model(examples=examples)["total_loss"], params)
     model.oe_loss_weight = 1.0
     g_total = _flat_grad(model(examples=examples)["total_loss"], params)
+    model.oe_loss_weight = keep
     g_oe = g_total - g_bc
     n_bc, n_oe = int((~np.isfinite(g_bc)).sum()), int((~np.isfinite(g_oe)).sum())
     if n_bc or n_oe:
@@ -85,7 +101,7 @@ def oe_gradient_ratio(model, examples, params):
             f"|g_oe|={np.linalg.norm(np.nan_to_num(g_oe)):.3g}); inspect the payload G rows and the "
             "arm's metric"
         )
-    return float(np.linalg.norm(g_oe) / max(np.linalg.norm(g_bc), 1e-12))
+    return g_bc, g_oe
 
 
 def calibrate(ratios, anchor_arm, anchor_lambda):
@@ -108,27 +124,29 @@ def oe_batch_stats(examples):
     return invalid, max_abs
 
 
-def measure_arm(model, loader, mode, batches, params):
-    """Set the arm's metric, replay the fixed sample prefix, return ratios + health."""
-    model.oe_mode = mode
+def measure_arm(model, loader, batches, params):
+    """Replay the fixed sample prefix; return (step gradient ratio, invalid frac, max |G|)."""
     device = next(model.parameters()).device
-    ratios, invalid, g_max = [], [], []
+    g_bc = g_oe = None
+    invalid, g_max = [], []
     for index, examples in enumerate(loader):
         if index >= batches:
             break
-        _check_preprocessed(examples)
+        check_preprocessed(examples)
         sta = oe_batch_stats(examples)
         invalid.append(sta[0])
         g_max.append(sta[1])
-        ratios.append(oe_gradient_ratio(model, _to_device(examples, device), params))
-    if not ratios:
+        bc, oe = oe_gradients(model, to_device(examples, device), params)
+        g_bc = bc if g_bc is None else g_bc + bc
+        g_oe = oe if g_oe is None else g_oe + oe
+    if g_bc is None:
         raise RuntimeError("dataloader produced no batches")
-    return ratios, float(np.mean(invalid)), float(np.nanmax(g_max))
+    ratio = float(np.linalg.norm(g_oe) / max(np.linalg.norm(g_bc), 1e-12))
+    return ratio, float(np.mean(invalid)), float(np.nanmax(g_max))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config-yaml", required=True, help="data + backbone config (any arm YAML)")
     parser.add_argument("--ckpt", required=True, help="checkpoint whose gradient landscape defines the dose")
     parser.add_argument(
         "--arm", action="append", required=True, metavar="NAME=YAML", help="repeatable; the YAML's mode picks the metric"
@@ -156,40 +174,26 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    from omegaconf import OmegaConf
-
-    from starVLA.dataloader import build_dataloader
-    from starVLA.model.framework.base_framework import build_framework
-    from starVLA.model.framework.share_tools import apply_config_compat
-
-    cfg = apply_config_compat(OmegaConf.load(args.config_yaml))
-    cfg.output_dir = str(out_dir)  # build_dataloader writes dataset statistics here
-    model = build_framework(cfg)
-    model.to(args.device)
-    model.eval()
-    _load_into(model, _load_state_dict(args.ckpt), Path(args.ckpt).name)
-
-    loader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
-    dataset = getattr(loader, "dataset", None)
-    if dataset is not None and callable(getattr(dataset, "set_epoch", None)):
-        dataset.set_epoch(0)
-
-    params = [p for p in model.parameters() if p.requires_grad]
     modes, ratios = {}, {}
     for name, path in arms:
-        mode = OmegaConf.load(path).framework.oe.mode
-        modes[name] = mode
-        samples, invalid, g_max = measure_arm(model, loader, mode, args.batches, params)
-        ratios[name] = float(np.mean(samples))
+        model, loader = build_policy(path, out_dir, args.device)  # arm == its own YAML
+        load_checkpoint(model, args.ckpt)
+        params = [p for p in model.parameters() if p.requires_grad]
+        modes[name] = model.oe_mode
+        ratios[name], invalid, g_max = measure_arm(model, loader, args.batches, params)
         print(
-            f"[calib] {name:<12} mode={mode:<11} r={ratios[name]:.4f}"
-            f"  (std {np.std(samples):.4f}, invalid {invalid:.3f}, max|G| {g_max:.3g})"
+            f"[calib] {name:<12} mode={modes[name]:<11} r={ratios[name]:.4f}"
+            f"  (invalid {invalid:.3f}, max|G| {g_max:.3g})"
         )
+        del model, loader
+        gc.collect()
+        torch.cuda.empty_cache()  # the next arm builds its own framework
 
     lambdas = calibrate(ratios, args.anchor_arm, args.anchor_lambda)
     rho = args.anchor_lambda * ratios[args.anchor_arm]
 
     print(f"\n[calib] anchor {args.anchor_arm}: lambda {args.anchor_lambda:g} -> rho = {rho:.4f}")
+    print(f"[calib] {args.batches} microbatch(es) per arm; r is a step ratio only if that is one training step")
     print(f"{'arm':<12} {'mode':<12} {'r=lambda1':>10} {'lambda*':>10} {'rho@lambda*':>12}")
     for name, _ in arms:
         print(
@@ -198,7 +202,6 @@ def main():
         )
 
     payload = {
-        "config_yaml": str(args.config_yaml),
         "checkpoint": str(args.ckpt),
         "batches": args.batches,
         "anchor_arm": args.anchor_arm,

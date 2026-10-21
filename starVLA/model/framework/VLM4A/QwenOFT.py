@@ -185,11 +185,17 @@ class Qwenvl_OFT(baseframework):
             self.motion_head = MotionHead(self.qwen_vl_interface.model.config.hidden_size)
 
         oe_cfg = self.config.framework.get("oe", None)
-        self.oe_mode = oe_cfg.get("mode", "full") if oe_cfg else None
+        self.oe_mode, self.oe_loss_weight = None, 0.0
         if oe_cfg is not None:
+            # One config per arm: the mode *and* its gradient-calibrated weight are one setting.
+            # A default here would silently train an arm at the wrong dose (see design doc §6.10).
+            for key in ("mode", "loss_weight"):
+                if key not in oe_cfg:
+                    raise ValueError(f"framework.oe.{key} is required when framework.oe is set")
+            self.oe_mode = oe_cfg.mode
+            self.oe_loss_weight = float(oe_cfg.loss_weight)
             if self.oe_mode not in OE_MODES:
                 raise ValueError(f"unsupported framework.oe.mode {self.oe_mode} (expected one of {OE_MODES})")
-            self.oe_loss_weight = float(oe_cfg.get("loss_weight", 1.0))
             if self.motion_mode is not None:
                 raise ValueError("framework.motion and framework.oe are mutually exclusive (gate B arms)")
 

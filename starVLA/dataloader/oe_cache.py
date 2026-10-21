@@ -100,20 +100,30 @@ class OutcomeGeometryCache:
             for tid in sorted(lengths):
                 offsets[tid] = start
                 start += max(lengths[tid] - chunk_h + 1, 0)
+            if start != G.shape[0]:
+                # The row domain is defined twice (writer: precompute_g.n_rows, reader: here);
+                # any drift silently pairs a state with another state's geometry.
+                raise ValueError(f"{directory}: G.npy has {G.shape[0]} rows but lengths.json implies {start}")
             half_range = np.load(directory / "half_range.npy").astype(np.float32)
             task_mean = np.load(directory / "task_mean.npy").astype(np.float32)
             trace_mean = float(np.load(directory / "trace_mean.npy"))
+            # e_raw = e_norm * half_range and the per-mode normalizers all divide by a trace,
+            # so a non-finite or zero statistic turns the geometry term into silent garbage.
+            for stat_name, stat, positive in (
+                ("half_range.npy", half_range, True),
+                ("task_mean.npy", task_mean, False),
+                ("trace_mean.npy", trace_mean, True),
+            ):
+                if not np.isfinite(stat).all():
+                    raise ValueError(f"{directory}: {stat_name} has non-finite entries")
+                if positive and not (np.asarray(stat) > 0).all():
+                    raise ValueError(f"{directory}: {stat_name} must be strictly positive")
             rank = perm = None
             if self.shuffle:
                 rank = np.load(directory / "rank.npy")
                 perm = np.load(directory / "perm.npy")
             self._entries[dataset_name] = (G, lengths, offsets, chunk_h, half_range, task_mean, trace_mean, rank, perm)
         return self._entries[dataset_name]
-
-    def _invalid(self, payload):
-        payload["G"] = np.full_like(payload["G"], np.nan)
-        payload["valid"] = False
-        return payload
 
     def get(self, dataset_name: str, trajectory_id: int, step: int) -> dict:
         """Per-sample OE payload: {G, valid, half_range, task_mean, trace_mean}."""

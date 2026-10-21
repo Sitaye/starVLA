@@ -91,6 +91,16 @@ def _suite_half_range(suite):
     return half
 
 
+def n_rows(length):
+    """Chunks an episode contributes: one per fit position, none when the episode is too short.
+
+    The reader (``oe_cache``) and the writer must agree on this exactly — a negative term
+    would shift ``row0`` for every following episode, leaving finite rows in the wrong
+    slots, which the loss cannot detect.
+    """
+    return max(int(length) - branch.CHUNK_H + 1, 0)
+
+
 def _replay_geometry(env, actions, layout, G_mmap, row0):
     """One full-episode replay pass; writes G rows for t in [0, T - CHUNK_H].
 
@@ -143,7 +153,7 @@ def _episode_geometry(payload):
         return {
             "suite": Path(suite_dir).name,
             "episode_index": ep_index,
-            "n_rows": T - branch.CHUNK_H + 1,
+            "n_rows": n_rows(T),
             "n_valid": n_valid,
             "replay_excess": max(match["replay_excess"].values()),
         }
@@ -157,11 +167,11 @@ def _write_stats(data_root, out_root, suites, seed):
     for suite_name in suites:
         directory = Path(out_root) / suite_name
         G = np.load(directory / "G.npy", mmap_mode="r")
-        n_rows = G.shape[0]
-        c = np.empty(n_rows, dtype=np.float64)
+        total_rows = G.shape[0]
+        c = np.empty(total_rows, dtype=np.float64)
         task_mean = np.zeros(G.shape[1:], dtype=np.float64)
         n_valid = 0
-        for i in range(n_rows):
+        for i in range(total_rows):
             row = np.asarray(G[i], dtype=np.float64)
             if not np.isfinite(row).all():
                 c[i] = np.nan
@@ -179,14 +189,14 @@ def _write_stats(data_root, out_root, suites, seed):
         rng = np.random.default_rng(seed + zlib.crc32(suite_name.encode("utf-8")))
         valid_idx = np.flatnonzero(np.isfinite(c))
         perm = rng.permutation(valid_idx).astype(np.int64)
-        rank = np.full(n_rows, -1, dtype=np.int64)
+        rank = np.full(total_rows, -1, dtype=np.int64)
         rank[valid_idx] = np.arange(len(valid_idx), dtype=np.int64)
         np.save(directory / "perm.npy", perm)
         np.save(directory / "rank.npy", rank)
         manifest["suites"][suite_name] = {
-            "rows": int(n_rows),
+            "rows": int(total_rows),
             "valid_rows": int(n_valid),
-            "coverage": n_valid / max(n_rows, 1),
+            "coverage": n_valid / max(total_rows, 1),
             "trace_mean": trace_mean,
         }
     manifest["seed"] = seed
@@ -207,7 +217,7 @@ def precompute(data_root, out_root, suites, seed, workers, camera=None):
         rows = suite.episode_rows()
         probe = suite.actions(rows[0]["episode_index"])
         dim = probe.shape[1]
-        shape = (sum(r["length"] - branch.CHUNK_H + 1 for r in rows), branch.CHUNK_H * dim, branch.CHUNK_H * dim)
+        shape = (sum(n_rows(r["length"]) for r in rows), branch.CHUNK_H * dim, branch.CHUNK_H * dim)
         directory = out_root / suite_name
         directory.mkdir(parents=True, exist_ok=True)
         np.lib.format.open_memmap(directory / "G.npy", mode="w+", dtype=G_DTYPE, shape=shape)[:] = np.nan
@@ -220,7 +230,7 @@ def precompute(data_root, out_root, suites, seed, workers, camera=None):
         row0 = 0
         for r in rows:
             payloads.append((str(suite_dir), r["episode_index"], row0, camera, g_path))
-            row0 += r["length"] - branch.CHUNK_H + 1
+            row0 += n_rows(r["length"])
 
     n_fail = 0
     with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:

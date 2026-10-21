@@ -100,45 +100,6 @@ def test_pearson_handles_constant_side():
     assert PROBE._pearson(np.arange(5.0), np.arange(5.0)) == pytest.approx(1.0)
 
 
-def test_to_device_reaches_into_a_userdict_batch_feature():
-    """The processor returns a BatchFeature (UserDict): a Mapping, but not a dict."""
-    import collections
-
-    import torch
-
-    class Feature(collections.UserDict):
-        pass
-
-    tensors = Feature({
-        "input_ids": torch.zeros(2, dtype=torch.long),
-        "attention_mask": torch.ones(2, dtype=torch.long),
-        "pixel_values": torch.zeros(1),
-    })
-    batch = [{"qwen_inputs": tensors, "action": np.zeros((1, 8, 7)), "lang": "pick"}]
-    moved = PROBE._to_device(batch, torch.device("meta"))
-
-    assert isinstance(moved[0]["qwen_inputs"], Feature)
-    for value in moved[0]["qwen_inputs"].values():
-        assert value.device.type == "meta"
-    assert moved[0]["lang"] == "pick"  # non-tensor leaves untouched
-
-
-def test_to_device_keeps_plain_containers_and_numpy():
-    import torch
-
-    batch = [{"qwen_inputs": {"input_ids": torch.zeros(1, dtype=torch.long)}, "action": np.ones((1, 8, 7))}]
-    moved = PROBE._to_device(batch, torch.device("meta"))
-    assert isinstance(moved[0]["qwen_inputs"], dict)
-    assert moved[0]["qwen_inputs"]["input_ids"].device.type == "meta"
-    assert isinstance(moved[0]["action"], np.ndarray)
-
-
-def test_check_preprocessed_fails_loudly():
-    with pytest.raises(SystemExit, match="preprocess_in_dataloader"):
-        PROBE._check_preprocessed([{"action": np.zeros((1, 8, 7))}])
-    PROBE._check_preprocessed([{"qwen_inputs": {}}])  # present -> no raise
-
-
 def test_variance_ratio_detects_mean_seeking():
     pred, target = _world(64, grip_dead=False)
     healthy = PROBE.summarize(pred, target)

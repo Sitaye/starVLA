@@ -15,7 +15,8 @@ framework:
     preprocess_in_dataloader: true
   oe:
     mode: full
-    loss_weight: 1.0
+    # lambda* from the gradient calibration (design doc 6.10)
+    loss_weight: 0.559990
   action_model:
     action_dim: 7
     state_dim: 7

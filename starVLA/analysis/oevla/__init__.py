@@ -11,13 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""OE-VLA gate A: counterfactual outcome-geometry validation package.
+"""OE-VLA tooling: outcome-geometry estimation, gates A/B, and policy instruments.
 
-Pure-simulation, zero-training validation of the OE-VLA main hypothesis
-(docs/research/ac_review_new_idea_oevla_20261019.md). Protocol:
-docs/research/oevla_gate_a_protocol_20261019.md. Cluster-only execution
-(LIBERO/robosuite); estimation and analysis layers are pure numpy and unit
-tested on dev machines.
+Gate A (zero training): replay-based counterfactual geometry, per-state
+estimation and protocol checks -- docs/research/oevla_gate_a_protocol_20261019.md.
+Gate B (training): offline G precompute, the OE auxiliary loss and its dose
+calibration -- docs/research/oevla_gate_b_v2_design_20261020.md.
+Instruments: policy_io (build/load), probe_policy_dims, calibrate_oe_lambda.
+Simulator work runs on the LIBERO stack; estimation/analysis are pure numpy and
+unit tested on dev machines.
 """
 
 __version__ = "0.1"

@@ -122,34 +122,34 @@ def _e_norm_wide(chunk=CHUNK, act=7):
 
 
 def test_trace_eef_masks_gripper_and_keeps_scale():
-    """trace_eef drops the gripper cells and stays a mean over the kept cells."""
+    """trace_eef zeroes the gripper cells and keeps the same mean-over-cells convention."""
     chunk, act = CHUNK, 7
     d_total = chunk * act
     e = _e_norm_wide(chunk, act)
     payload = [dict(ex, valid=True) for ex in _payload(np.kron(np.eye(CHUNK), np.array([[4.0, 1.0], [1.0, 2.0]])))]
     loss, _ = oe_quadratic(payload, torch.tensor(e, dtype=torch.float32), "trace_eef", chunk)
     keep = np.arange(d_total) % act != OE_LOSS.GRIPPER_IDX
-    np.testing.assert_allclose(float(loss), float(((e**2)[:, keep].mean(-1)).mean()), rtol=1e-5)
+    np.testing.assert_allclose(float(loss), float(((e**2)[:, keep].sum(-1) / d_total).mean()), rtol=1e-5)
     # a pure gripper perturbation must not move the term at all
     e_grip = e.copy()
     e_grip[:, OE_LOSS.GRIPPER_IDX :: act] += 5.0
     loss_grip, _ = oe_quadratic(payload, torch.tensor(e_grip, dtype=torch.float32), "trace_eef", chunk)
     assert float(loss_grip) == pytest.approx(float(loss), rel=1e-6)
-    # mean over cells: an all-ones error on the kept support costs exactly 1.0
+    # mean over cells: an all-ones error costs the kept fraction, the gripper cells are free
     ones = torch.ones((1, d_total))
     loss_ones, _ = oe_quadratic(payload[:1], ones, "trace_eef", chunk)
-    assert float(loss_ones) == pytest.approx(1.0, rel=1e-5)
+    assert float(loss_ones) == pytest.approx(float(keep.sum() / d_total), rel=1e-5)
 
 
 def test_full_arm_matches_manual(payload):
     loss, valid_frac = _run("full", payload)
-    np.testing.assert_allclose(loss, _manual_full(payload).sum() / 1, rtol=1e-5)
+    np.testing.assert_allclose(loss, _manual_full(payload).sum() / len(payload), rtol=1e-5)
     assert valid_frac == pytest.approx(0.5)
 
 
 def test_diag_arm_ignores_offdiagonal(payload):
     loss, _ = _run("diag", payload)
-    np.testing.assert_allclose(loss, _manual_diag(payload).sum() / 1, rtol=1e-5)
+    np.testing.assert_allclose(loss, _manual_diag(payload).sum() / len(payload), rtol=1e-5)
 
 
 def test_task_fixed_is_state_free(payload):
@@ -164,17 +164,22 @@ def test_task_fixed_is_state_free(payload):
 def test_trace_arm_is_scaled_norm(payload):
     e = _e_raw()
     w0 = (np.trace(np.asarray(payload[0]["G"])) / D) / payload[0]["trace_mean"]
-    expected = w0 * (e[0] @ e[0]) / D  # only state 0 valid
+    expected = w0 * (e[0] @ e[0]) / D / len(payload)  # only state 0 is valid, mean over the batch
     loss, _ = _run("trace", payload)
     assert loss == pytest.approx(expected, rel=1e-5)
 
 
 def test_invalid_rows_excluded(payload):
-    """Invalid transitions contribute 0 to the term and shrink the denominator."""
+    """Invalid transitions contribute exact 0 and do not renormalize the valid rows.
+
+    The denominator stays the batch size, so a sample without a geometry row keeps the same
+    weight in the OE term as it has in the base L1; dropping it from the denominator would
+    rescale the whole arm by B / n_valid, i.e. by the episode-length distribution.
+    """
     loss, valid_frac = _run("full", payload)
     manual = _manual_full(payload)
     assert manual[1] == 0.0
-    assert loss == pytest.approx(manual[0], rel=1e-5)  # mean over 1 valid row
+    assert loss == pytest.approx(manual[0] / len(payload), rel=1e-5)
     assert valid_frac == pytest.approx(0.5)
 
 
@@ -276,6 +281,35 @@ class TestOEGeometryCache:
         fresh = mod.OutcomeGeometryCache(str(tmp_path), shuffle=True)
         again = np.asarray(fresh.get("suite_a", 0, 2)["G"], dtype=np.float32)
         assert np.allclose(again, np.asarray(shuffled.get("suite_a", 0, 2)["G"], dtype=np.float32))
+
+    def test_row_domain_mismatch_fails_fast(self, tmp_path):
+        """The writer's row count and lengths.json must agree, or states pair with the wrong geometry."""
+        root, _, n = self._build_suite(tmp_path)
+        (root / "lengths.json").write_text(json.dumps({"0": 12, "1": 15, "2": 10}))
+        cache = _oe_cache_mod().OutcomeGeometryCache(str(tmp_path), shuffle=False)
+        with pytest.raises(ValueError, match=f"has {n} rows but lengths.json implies"):
+            cache.get("suite_a", 0, 0)
+
+    def test_non_finite_statistics_fail_fast(self, tmp_path):
+        """e_raw = e_norm * half_range and every normalizer divides by a trace."""
+        mod = _oe_cache_mod()
+        root, _, _ = self._build_suite(tmp_path)
+        bad = np.full(7, np.nan, dtype=np.float32)
+        np.save(root / "half_range.npy", bad)
+        with pytest.raises(ValueError, match="has non-finite entries"):
+            mod.OutcomeGeometryCache(str(tmp_path), shuffle=False).get("suite_a", 0, 0)
+
+        root2 = tmp_path / "suite_b"
+        self._build_suite(tmp_path, name="suite_b")
+        np.save(root2 / "task_mean.npy", np.full((4, 4), np.inf, dtype=np.float16))
+        with pytest.raises(ValueError, match="has non-finite entries"):
+            mod.OutcomeGeometryCache(str(tmp_path), shuffle=False).get("suite_b", 0, 0)
+
+        root3 = tmp_path / "suite_c"
+        self._build_suite(tmp_path, name="suite_c")
+        np.save(root3 / "trace_mean.npy", np.float32(0.0))
+        with pytest.raises(ValueError, match="must be strictly positive"):
+            mod.OutcomeGeometryCache(str(tmp_path), shuffle=False).get("suite_c", 0, 0)
 
     def test_validate_suites_fail_fast(self, tmp_path):
         self._build_suite(tmp_path)
