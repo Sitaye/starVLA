@@ -7,8 +7,25 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 Framework_name=QwenOFT
 freeze_module_list=''
 base_vlm=/defaultShare/archive/linpenghan/models/Qwen3.5-0.8B/
-ARM=${1:?usage: bash run_oeB_train.sh <baseline|taskfixed|trace|diag|full|shuffled>[_P100]  # v2.1 nulls: trace_norm, trace_eef}
+ARM=${1:-}
+LAMBDA=${2:-}
+if [ -z "${ARM}" ] || [ -z "${LAMBDA}" ]; then
+  echo "usage: bash run_oeB_train.sh <arm> <lambda>  # arms: baseline taskfixed trace trace_eef diag full shuffled" >&2
+  exit 2
+fi
+# lambda_OE comes from calibrate_oe_lambda.py (bar/oe_calibration/calibration.json):
+# it is a mean-over-cells weight, so it is comparable across arms.
+case ${ARM} in
+  baseline|taskfixed|trace|trace_eef|diag|full|shuffled) ;;
+  *) echo "unknown arm ${ARM}; see calibrate_oe_lambda.py and train_oeB_*.yaml" >&2; exit 2 ;;
+esac
 config_yaml=./examples/simBenchmarks/LIBERO/train_files/train_oeB_${ARM}.yaml
+# baseline is the plain-BC reference: it must not receive framework.oe at all, since an
+# override under a missing key would create the section (mode defaults to "full").
+oe_args=()
+if [ "${ARM}" != baseline ]; then
+  oe_args+=(--framework.oe.loss_weight "${LAMBDA}")
+fi
 libero_data_root=/defaultShare/pubdata/OXE_LEROBOT_DATASET/libero_no_noops_1.0.0_lerobot/
 data_mix=libero_all
 seed=42
@@ -48,4 +65,5 @@ accelerate launch \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
   --swanlab_project cvpr27 \
+  "${oe_args[@]}"
   # --is_debug True

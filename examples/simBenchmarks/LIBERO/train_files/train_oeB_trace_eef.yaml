@@ -1,4 +1,4 @@
-run_id: oeB_trace_norm_P100
+run_id: oeB_trace_eef
 run_root_dir: playground/Checkpoints
 seed: 42
 wandb_entity: your_wandb_entity
@@ -14,8 +14,8 @@ framework:
     vl_hidden_dim: 1024
     preprocess_in_dataloader: true
   oe:
-    mode: trace_norm
-    loss_weight: 0.01
+    mode: trace_eef
+    loss_weight: 1.0
   action_model:
     action_dim: 7
     state_dim: 7
