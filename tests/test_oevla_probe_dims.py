@@ -137,3 +137,20 @@ def test_check_preprocessed_fails_loudly():
     with pytest.raises(SystemExit, match="preprocess_in_dataloader"):
         PROBE._check_preprocessed([{"action": np.zeros((1, 8, 7))}])
     PROBE._check_preprocessed([{"qwen_inputs": {}}])  # present -> no raise
+
+
+def test_variance_ratio_detects_mean_seeking():
+    pred, target = _world(64, grip_dead=False)
+    healthy = PROBE.summarize(pred, target)
+    assert all(0.8 < r < 1.3 for r in healthy["variance_ratio"])
+    assert 0.8 < healthy["overall_variance_ratio"] < 1.3
+
+    # A squared-error head on a bimodal channel regresses to the conditional mean:
+    # constant output -> zero variance on the gripper dim, +-1 target.
+    flat = target.copy()
+    flat[..., GRIPPER_IDX] = 0.06
+    collapsed = PROBE.summarize(flat, target)
+    assert collapsed["variance_ratio"][GRIPPER_IDX] == pytest.approx(0.0, abs=1e-9)
+    assert collapsed["gripper"]["close_rate_pred"] == pytest.approx([0.0] * target.shape[1])
+    # the continuous dims are untouched, so their ratio stays near 1
+    assert all(0.8 < r < 1.3 for r in collapsed["variance_ratio"][:GRIPPER_IDX])

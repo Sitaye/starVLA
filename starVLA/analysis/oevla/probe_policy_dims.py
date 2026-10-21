@@ -77,6 +77,9 @@ def summarize(pred, target):
     grip_tgt = target[..., GRIPPER_IDX]
     eef = slice(0, GRIPPER_IDX)
     sq_mass = np.square(err).sum(axis=(0, 1))
+    pred_std = pred.std(axis=(0, 1))  # per dim, over samples x chunk steps
+    target_std = target.std(axis=(0, 1))
+    variance_ratio = pred_std / np.where(target_std > 1e-9, target_std, np.nan)
 
     result = {
         "n_samples": int(n),
@@ -89,6 +92,14 @@ def summarize(pred, target):
         "eef_l1": float(abs_err[..., eef].mean()),
         "gripper_l1": float(abs_err[..., GRIPPER_IDX].mean()),
         "gripper_error_share": float(sq_mass[GRIPPER_IDX] / max(sq_mass.sum(), 1e-12)),
+        # A squared-error head on a bimodal channel regresses to the conditional
+        # mean, so output variance collapsing toward zero is the fingerprint of
+        # mean-seeking (and of a gripper that can no longer cross the close
+        # threshold) rather than of a merely offset prediction.
+        "per_dim_pred_std": pred_std.tolist(),
+        "per_dim_target_std": target_std.tolist(),
+        "variance_ratio": [None if np.isnan(v) else float(v) for v in variance_ratio],
+        "overall_variance_ratio": float(pred.std() / max(target.std(), 1e-12)),
         "gripper": {
             "close_rate_pred": (grip_pred >= CLOSE_THRESHOLD).mean(axis=0).tolist(),
             "close_rate_target": (grip_tgt >= CLOSE_THRESHOLD).mean(axis=0).tolist(),
@@ -225,6 +236,10 @@ def _print_table(results):
     print("\n=== per-dim L1 (x,y,z,roll,pitch,yaw,grip) ===")
     for label in labels:
         print(f"{label:<14} " + " ".join(f"{v:.3f}" for v in results[label]["per_dim_l1"]))
+    print("\n=== output/target std ratio per dim (1 = tracks the data, ~0 = predicts the mean) ===")
+    for label in labels:
+        ratio = ["n/a" if v is None else f"{v:.2f}" for v in results[label]["variance_ratio"]]
+        print(f"{label:<14} " + " ".join(ratio) + f"   overall {results[label]['overall_variance_ratio']:.2f}")
     print("\n=== gripper state-blindness (R^2 across samples per step) ===")
     for label in labels:
         r2 = results[label]["state_blindness"]["gripper_r2_across_samples"]
