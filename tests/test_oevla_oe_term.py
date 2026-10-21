@@ -193,7 +193,7 @@ class TestOEGeometryCache:
         np.save(root / "trace_mean.npy", np.float32(3.0))
         (root / "meta.json").write_text(json.dumps({"chunk_h": CHUNK, "action_dim": ACT}))
         perm = np.random.default_rng(1234).permutation(n).astype(np.int64)
-        rank = np.argsort(perm)  # rank[perm[j]] == j
+        rank = np.arange(n, dtype=np.int64)  # production convention: rank[row] = valid-position
         np.save(root / "rank.npy", rank)
         np.save(root / "perm.npy", perm)
         (root / "lengths.json").write_text(json.dumps({str(tid): t for tid, t in enumerate(lengths)}))
