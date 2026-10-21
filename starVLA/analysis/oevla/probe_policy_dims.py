@@ -138,14 +138,30 @@ def _load_into(model, state, label):
         raise ValueError(f"{label}: {len(unexpected)} unexpected keys, e.g. {list(unexpected)[:5]}")
 
 
+def _to_device(obj, device):
+    """Recursively move tensors to ``device`` — what accelerate's dataloader does during training.
+
+    ``predict_action``/``forward`` consume ``examples[0]["qwen_inputs"]`` as handed to them, so
+    without accelerate (no DataLoaderShard) the nested tensors would stay on the CPU.
+    """
+    if isinstance(obj, torch.Tensor):
+        return obj.to(device, non_blocking=True)
+    if isinstance(obj, dict):
+        return {k: _to_device(v, device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_to_device(v, device) for v in obj)
+    return obj
+
+
 def collect(model, loader, batches):
     """Run ``predict_action`` on a fixed prefix of the loader; return (pred, target)."""
     horizon = int(model.action_horizon)
+    device = next(model.parameters()).device
     preds, targets = [], []
     for index, examples in enumerate(loader):
         if index >= batches:
             break
-        out = model.predict_action(examples=examples)
+        out = model.predict_action(examples=_to_device(examples, device))
         preds.append(np.asarray(out["normalized_actions"], dtype=np.float64))
         targets.append(np.asarray([np.asarray(ex["action"]) for ex in examples], dtype=np.float64)[:, -horizon:])
     if not preds:
@@ -155,10 +171,12 @@ def collect(model, loader, batches):
 
 def check_instrument(model, examples):
     """Reproduce the trainer's ``pure_action_loss`` on one batch (self-check)."""
+    device = next(model.parameters()).device
+    batch = _to_device(examples, device)
     with torch.no_grad():
-        own = float(model(examples=examples)["pure_action_loss"])
+        own = float(model(examples=batch)["pure_action_loss"])
     horizon = int(model.action_horizon)
-    pred = np.asarray(model.predict_action(examples=examples)["normalized_actions"], dtype=np.float64)
+    pred = np.asarray(model.predict_action(examples=batch)["normalized_actions"], dtype=np.float64)
     target = np.asarray([np.asarray(ex["action"]) for ex in examples], dtype=np.float64)[:, -horizon:]
     return {"pure_action_loss": own, "l1_recomputed": float(np.abs(pred - target).mean())}
 
