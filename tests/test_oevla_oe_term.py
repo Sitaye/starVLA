@@ -189,6 +189,26 @@ def test_all_invalid_is_zero():
         assert valid_frac == 0.0
 
 
+def test_invalid_rows_do_not_poison_gradients():
+    """A NaN payload row must not reach the gradient, even though the loss stays finite.
+
+    torch.where zeroes the value and the upstream gradient of an invalid row, but the VJP
+    of e^T G e still multiplies by G: 0 * NaN = NaN. Every arm reading the per-sample
+    geometry therefore produced a finite loss with an all-NaN parameter gradient, which is
+    exactly how the first rounds reported sane oe_loss while scoring 0%.
+    """
+    step_g = np.kron(np.eye(CHUNK), np.array([[4.0, 1.0], [1.0, 2.0]]))
+    task_mean = np.kron(np.eye(CHUNK), np.array([[1.5, 0.25], [0.25, 1.0]]))
+    payload = _payload(step_g, invalid_b=True, task_mean=task_mean)  # row 1 is NaN + invalid
+    for mode in OE_MODES:
+        e = _e_norm().clone().requires_grad_(True)
+        loss, _ = oe_quadratic(payload, e, mode, CHUNK)
+        (grad,) = torch.autograd.grad(loss, e)
+        assert torch.isfinite(loss), mode
+        assert torch.isfinite(grad).all(), f"{mode} produced a non-finite gradient"
+        assert torch.count_nonzero(grad[1]) == 0, f"{mode} leaked gradient into the invalid row"
+
+
 def test_shuffled_matches_full_math():
     """shuffled differs from full only by the cache-level row permutation."""
     step_g = np.kron(np.eye(CHUNK), np.array([[4.0, 1.0], [1.0, 2.0]]))

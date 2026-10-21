@@ -73,6 +73,11 @@ def oe_quadratic(payload, e_norm, mode, chunk_len):
         G_raw = torch.as_tensor(
             np.stack([np.asarray(ex["G"], dtype=np.float32) for ex in payload]), device=e_norm.device
         )  # [B, d, d] raw, NaN rows mark invalid transitions
+        # Invalid rows are masked at the end, but torch.where only zeroes the value and the
+        # upstream gradient: the VJP of the quadratic form still multiplies by G, and
+        # 0 * NaN = NaN. An unmasked NaN row therefore poisons the whole parameter gradient
+        # while the reported loss stays finite. Zero the rows before any arithmetic.
+        G_raw = torch.nan_to_num(G_raw, nan=0.0, posinf=0.0, neginf=0.0)
         if mode == "task_fixed":
             G_eff = torch.as_tensor(
                 np.stack([np.asarray(ex["task_mean"], dtype=np.float32) for ex in payload]), device=e_norm.device
