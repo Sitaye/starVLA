@@ -24,26 +24,30 @@ arm differences are purely structural:
   diag        diagonal of the per-state normalized G;
   full        per-state normalized G (the OE-VLA main arm);
   shuffled    G rows permuted within the suite at cache level (pairing control);
-  trace_norm  identity on the normalized action space, all cells (null v2, output-space);
-  trace_eef   identity on the EEF cells only, gripper masked (null v2, G-family-symmetric).
+  trace_eef   identity on the EEF cells only, gripper masked (v2 null).
 
 `trace` applies the raw-unit identity and is therefore dominated by the gripper
 channel (half_range_grip = 1.0 vs ~0.03 for the rotation dims), while every G-family
 arm carries an exactly zero gripper weight — the analytic Jacobian is blind to the
-binary channel. The v2 nulls are declared in the normalized space where the identity
-really is isotropic, and `trace_eef` additionally masks the gripper so that all
-geometry-bearing arms share the same cell support. Every mode keeps a mean diagonal
-of 1 over the full chunk x action_dim space, so λ is comparable across arms.
+binary channel. It is the demonstration arm for that failure, not a null; the null
+is `trace_eef`, which masks the gripper so all geometry-bearing arms share the same
+cell support and a mean diagonal of 1.
+
+Every mode is normalized to a **mean over cells** (not a sum): the base loss is an L1
+mean over the same cells, so λ stays a dimensionless weight relative to it, and stays
+comparable across arms and chunk lengths. A sum would make the auxiliary term D times
+larger than its nominal λ, which is how the first three rounds stayed at or above
+parity with the base loss even at λ = 0.01.
 
 Invalid transitions (NaN G rows, unmatched episodes) drop out of the OE term
 only — the sample stays in the batch with the base loss untouched, keeping
-the sample stream identical across all six arms.
+the sample stream identical across all arms.
 """
 
 import numpy as np
 import torch
 
-OE_MODES = ("task_fixed", "trace", "diag", "full", "shuffled", "trace_norm", "trace_eef")
+OE_MODES = ("task_fixed", "trace", "diag", "full", "shuffled", "trace_eef")
 GRIPPER_IDX = 6  # binary channel; masked by trace_eef, zero-weighted by every G-family arm
 
 
@@ -54,18 +58,13 @@ def oe_quadratic(payload, e_norm, mode, chunk_len):
     e_norm: [B, chunk_len * action_dim] normalized action error.
     """
     valid = torch.as_tensor(np.array([ex["valid"] for ex in payload], dtype=bool), device=e_norm.device)  # [B]
-    if mode in ("trace_norm", "trace_eef"):
-        # The v2 nulls live in the normalized action space and read no geometry at all.
-        d_total = e_norm.shape[-1]
+    d_total = e_norm.shape[-1]
+    if mode == "trace_eef":
+        # The v2 null lives in the normalized action space and reads no geometry at all.
         if d_total % chunk_len:
             raise ValueError(f"action error width {d_total} is not a multiple of chunk_len {chunk_len}")
-        action_dim = d_total // chunk_len
-        keep = torch.arange(d_total, device=e_norm.device) % action_dim != GRIPPER_IDX if mode == "trace_eef" else None
-        if keep is None:
-            quad = e_norm.square().sum(-1)
-        else:
-            # mean diagonal 1 over the full space, exactly like the G-family arms
-            quad = e_norm.square()[:, keep].sum(-1) * d_total / keep.sum()
+        keep = torch.arange(d_total, device=e_norm.device) % (d_total // chunk_len) != GRIPPER_IDX
+        quad = e_norm.square()[:, keep].mean(-1)
     else:
         e_raw = e_norm * torch.as_tensor(
             np.stack([np.tile(np.asarray(ex["half_range"], dtype=np.float32), chunk_len) for ex in payload]),
@@ -88,7 +87,7 @@ def oe_quadratic(payload, e_norm, mode, chunk_len):
         else:  # full / shuffled
             c = torch.diagonal(G_raw, dim1=-2, dim2=-1).mean(-1, keepdim=True).clamp(min=1e-12)  # [B, 1]
             G_eff = G_raw / c.unsqueeze(-1)  # [B, d, d]
-        quad = torch.einsum("bi,bij,bj->b", e_raw, G_eff, e_raw)
+        quad = torch.einsum("bi,bij,bj->b", e_raw, G_eff, e_raw) / d_total
     quad = torch.where(valid, quad, torch.zeros_like(quad))
     oe_loss = quad.sum() / valid.float().sum().clamp(min=1.0)
     return oe_loss, valid.float().mean().detach()
