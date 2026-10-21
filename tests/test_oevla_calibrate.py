@@ -71,6 +71,25 @@ def test_gradient_ratio_recovers_aux_from_toggled_objective():
     assert model.oe_loss_weight == 1.0  # left enabled after the measurement pass
 
 
+class _NaNOnAux(torch.nn.Module):
+    """Base term is fine; the auxiliary term's gradient is NaN (the poison we guard against)."""
+    def __init__(self):
+        super().__init__()
+        self.w = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+        self.oe_loss_weight = 0.0
+        self.oe_mode = "full"
+
+    def forward(self, examples=None):
+        aux = self.w.square().sum() if self.oe_loss_weight == 0.0 else self.w.square().sum() * torch.tensor(float("nan"))
+        return {"total_loss": self.w.abs().sum() + self.oe_loss_weight * aux}
+
+
+def test_gradient_ratio_fails_loud_on_nan_aux():
+    model = _NaNOnAux()
+    with pytest.raises(RuntimeError, match="non-finite gradient"):
+        CAL.oe_gradient_ratio(model, None, list(model.parameters()))
+
+
 def test_measure_arm_sets_mode_and_averages_batches():
     model = _SumOfTwoTerms()
     loader = [_batch(), _batch()]

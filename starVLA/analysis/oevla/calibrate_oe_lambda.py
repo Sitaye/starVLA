@@ -74,7 +74,18 @@ def oe_gradient_ratio(model, examples, params):
     g_bc = _flat_grad(model(examples=examples)["total_loss"], params)
     model.oe_loss_weight = 1.0
     g_total = _flat_grad(model(examples=examples)["total_loss"], params)
-    return float(np.linalg.norm(g_total - g_bc) / max(np.linalg.norm(g_bc), 1e-12))
+    g_oe = g_total - g_bc
+    n_bc, n_oe = int((~np.isfinite(g_bc)).sum()), int((~np.isfinite(g_oe)).sum())
+    if n_bc or n_oe:
+        # A NaN here used to surface as a silent `r=nan` row in the summary; say which
+        # term broke and on what scale, so a stale cache or a bad mask cannot hide.
+        raise RuntimeError(
+            f"non-finite gradient with mode {model.oe_mode!r}: {n_bc} bad cells in the base term, "
+            f"{n_oe} in the OE term (|g_bc|={np.linalg.norm(np.nan_to_num(g_bc)):.3g}, "
+            f"|g_oe|={np.linalg.norm(np.nan_to_num(g_oe)):.3g}); inspect the payload G rows and the "
+            "arm's metric"
+        )
+    return float(np.linalg.norm(g_oe) / max(np.linalg.norm(g_bc), 1e-12))
 
 
 def calibrate(ratios, anchor_arm, anchor_lambda):
