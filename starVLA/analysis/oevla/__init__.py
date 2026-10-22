@@ -17,7 +17,8 @@ Gate A (zero training): replay-based counterfactual geometry, per-state
 estimation and protocol checks -- docs/research/oevla_gate_a_protocol_20261019.md.
 Gate B (training): offline G precompute, the OE auxiliary loss and its dose
 calibration -- docs/research/oevla_gate_b_v2_design_20261020.md.
-Instruments: policy_io (build/load), probe_policy_dims, calibrate_oe_lambda.
+Instruments: policy_io (build/load), probe_policy_dims, calibrate_oe_lambda,
+paired_eval (the gate's decision statistic over two eval trees).
 Simulator work runs on the LIBERO stack; estimation/analysis are pure numpy and
 unit tested on dev machines.
 """
