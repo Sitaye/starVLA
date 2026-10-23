@@ -26,7 +26,8 @@ export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_PLUS_HOME}:${STARVLA_DIR}"
 ckpt_dir=$(dirname "$your_ckpt")
 eval_name=$(basename "$your_ckpt")
 eval_name="${eval_name%.*}"
-eval_root="${ckpt_dir}/${eval_name}"
+# Same root as the other plus drivers, deliberately distinct from LIBERO's.
+eval_root="${ckpt_dir}/${eval_name}_plus"
 mkdir -p "${eval_root}"
 
 base_port="${BASE_PORT:-9883}"
