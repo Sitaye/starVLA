@@ -38,6 +38,7 @@ after seeing the results is exactly the freedom the gate was written to remove.
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -72,6 +73,11 @@ def load_arm(root, suites=None):
                 shard = json.loads(path.read_text())
             except (OSError, json.JSONDecodeError) as exc:
                 raise SystemExit(f"cannot read shard {path}: {exc}") from exc
+            if not isinstance(shard, dict) or all(not isinstance(v, dict) for v in shard.values()):
+                # A per-suite summary (`overall_sr.json` and friends) reuses the count names at the
+                # top level; it aggregates the shards, so counting it would double-count the suite.
+                print(f"[paired] ignoring non-shard {path}", file=sys.stderr)
+                continue
             for key, entry in shard.items():
                 try:
                     n, s = int(entry["total_count"]), int(entry["success_count"])
@@ -209,13 +215,17 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     pairs = {}
-    head, *rest = [name for name, _ in runs]
-    for name in rest:
-        record = compare(strata[head], strata[name], head, name, args.draws, args.seed)
-        pairs[f"{head}|{name}"] = record
+    rows = []
+    names = [name for name, _ in runs]
+    for i, name_a in enumerate(names):
+        for name_b in names[i + 1 :]:
+            record = compare(strata[name_a], strata[name_b], name_a, name_b, args.draws, args.seed)
+            pairs[f"{name_a}|{name_b}"] = record
+            rows.append((name_a, name_b, record))
+    for name_a, name_b, record in sorted(rows, key=lambda r: -abs(r[2]["delta_pp"])):
         lo, hi = record["ci_pp"]
         print(
-            f"[paired] {head} vs {name:<14} d={record['delta_pp']:+7.3f}pp  "
+            f"[paired] {name_a} vs {name_b:<14} d={record['delta_pp']:+7.3f}pp  "
             f"CI[{lo:+7.3f},{hi:+7.3f}]  SE={record['se_pp']:.3f}  p={record['p_permutation']:.4f}"
         )
 
@@ -242,13 +252,11 @@ def main():
                 raise SystemExit(f"--reference {reference!r} is not one of {[n for n, _ in runs]}")
             key = f"{args.primary}|{reference}"
             if key not in pairs:
-                other = pairs[f"{reference}|{args.primary}"]
-                flipped = dict(other, a=args.primary, b=reference)
-                flipped["delta_pp"] = -other["delta_pp"]
-                flipped["ci_pp"] = [-other["ci_pp"][1], -other["ci_pp"][0]]
-                flipped["se_pp"] = other["se_pp"]
-                flipped["p_permutation"] = other["p_permutation"]
-                pairs[key] = flipped
+                # Recompute rather than negate: every field (per_suite sr_a/sr_b, per_key) then
+                # stays self-consistent instead of describing the reverse comparison.
+                pairs[key] = compare(
+                    strata[args.primary], strata[reference], args.primary, reference, args.draws, args.seed
+                )
             gate[reference] = judge(pairs[key], args.min_delta)
         verdict = all(row["pass"] for row in gate.values())
         print(f"\n[gate] margin +{args.min_delta:g}pp and CI low > 0 versus every reference")

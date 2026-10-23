@@ -63,6 +63,14 @@ def test_load_arm_rejects_a_malformed_entry(tmp_path):
         PE.load_arm(tmp_path)
 
 
+def test_load_arm_skips_a_flat_per_suite_summary(tmp_path, capsys):
+    """`overall_sr.json` carries the same count names at the top level; summing it double-counts."""
+    _write(tmp_path, "libero_10", "0_4.json", {"0": {"total_count": 50, "success_count": 44}})
+    _write(tmp_path, "libero_10", "overall_sr.json", {"total_count": 50, "success_count": 46, "sr": 0.92})
+    assert PE.load_arm(tmp_path) == {("libero_10", "0"): (50, 44)}
+    assert "overall_sr.json" in capsys.readouterr().err
+
+
 def test_load_arm_rejects_more_successes_than_episodes(tmp_path):
     _write(tmp_path, "libero_goal", "0_4.json", {"0": {"total_count": 5, "success_count": 6}})
     with pytest.raises(SystemExit, match="outside"):
@@ -137,3 +145,25 @@ def test_judge_requires_the_margin_and_a_positive_ci_low():
     assert PE.judge(passing, 3.0)["pass"]
     assert not PE.judge(too_small, 3.0)["pass"]
     assert not PE.judge(straddling, 3.0)["pass"]
+
+
+def test_main_gates_the_primary_against_any_reference(tmp_path, monkeypatch, capsys):
+    """The gate must work when the primary is not the first `--run`; that lookup used to raise."""
+    roots = {}
+    for name, successes in (("base", 40), ("full", 48), ("taskfixed", 44)):
+        root = tmp_path / name
+        shard = {str(k): {"total_count": 50, "success_count": successes} for k in range(8)}
+        _write(root, "libero_goal", "0_4.json", shard)
+        roots[name] = root
+    out_dir = tmp_path / "out"
+    argv = ["paired_eval", "--draws", "500", "--min-delta", "3.0", "--out-dir", str(out_dir)]
+    for name, root in roots.items():
+        argv += ["--run", f"{name}={root}"]
+    argv += ["--primary", "full", "--reference", "taskfixed"]
+    monkeypatch.setattr("sys.argv", argv)
+    PE.main()
+    payload = json.loads((out_dir / "paired_eval.json").read_text())
+    assert payload["gate"]["verdict"] == "GO"
+    assert payload["gate"]["references"]["taskfixed"]["pass"]
+    assert payload["pairs"]["full|taskfixed"]["delta_pp"] == pytest.approx(8.0)
+    assert "GO" in capsys.readouterr().out
