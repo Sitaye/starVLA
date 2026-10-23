@@ -37,6 +37,7 @@ after seeing the results is exactly the freedom the gate was written to remove.
 """
 
 import argparse
+import fnmatch
 import json
 import sys
 from pathlib import Path
@@ -46,11 +47,17 @@ import numpy as np
 PER_SUITE_FILE = "task_results.json"
 
 
-def load_arm(root, suites=None):
-    """Return `{(suite, key): (episodes, successes)}` summed over every shard of a suite.
+def load_arm(root, suites=None, shard_glob="*.json", skip_globs=(), expected_per_suite=None):
+    """Return `{(suite, key): (episodes, successes)}` summed over the selected shards of a suite.
 
     Shards are disjoint task ranges, so keys accumulate rather than collide; a key that
     appears twice is summed, which is what a re-run of an overlapping shard would also be.
+
+    `logs/<suite>/` is shared by every endpoint that ever scored this checkpoint, and the two
+    endpoints do not agree on what a key means: LIBERO writes `<start>_<end>.json` keyed by task
+    id, LIBERO-Plus writes `<start>_to_<end>.json` keyed by disturbance category. Globbing all of
+    it mixes both, doubles the episode count and breaks the key alignment, so `shard_glob` /
+    `skip_globs` select one endpoint and `expected_per_suite` refuses an implausible total.
     """
     logs = Path(root) / "logs"
     if not logs.is_dir():
@@ -64,10 +71,14 @@ def load_arm(root, suites=None):
     strata = {}
     for suite in suites:
         files = sorted(
-            p for p in (logs / suite).glob("*.json") if p.name != PER_SUITE_FILE and not p.name.startswith(".tmp_")
+            p
+            for p in (logs / suite).glob(shard_glob)
+            if p.name != PER_SUITE_FILE
+            and not p.name.startswith(".tmp_")
+            and not any(fnmatch.fnmatch(p.name, g) for g in skip_globs)
         )
         if not files:
-            raise SystemExit(f"{logs / suite}: no shard JSONs")
+            raise SystemExit(f"{logs / suite}: no shard JSONs match {shard_glob!r} (skipping {list(skip_globs)})")
         for path in files:
             try:
                 shard = json.loads(path.read_text())
@@ -87,7 +98,33 @@ def load_arm(root, suites=None):
                     raise SystemExit(f"{path}: {key!r} has successes={s} outside [0, {n}]")
                 prev_n, prev_s = strata.get((suite, key), (0, 0))
                 strata[(suite, key)] = (prev_n + n, prev_s + s)
+    per_suite = {s: sum(n for (suite, _), (n, _) in strata.items() if suite == s) for s in suites}
+    print(f"[paired] {Path(root).name}: " + " ".join(f"{s}={per_suite[s]}" for s in suites), file=sys.stderr)
+    if expected_per_suite is not None:
+        wrong = {s: n for s, n in per_suite.items() if n != expected_per_suite}
+        if wrong:
+            raise SystemExit(
+                f"{root}: suite episode counts {wrong} differ from the expected {expected_per_suite} "
+                f"(select one endpoint with --shard-glob/--skip-glob)"
+            )
     return strata
+
+
+def list_shards(root, suites=None):
+    """Print every JSON file in every suite dir with its episode total, to expose a mixed logs/ tree."""
+    logs = Path(root) / "logs"
+    present = sorted(p.name for p in logs.iterdir() if p.is_dir())
+    print(f"\n[root] {root}")
+    print(f"{'suite':<16} {'file':<26} {'episodes':>8} {'keys':>5}")
+    for suite in suites or present:
+        for path in sorted((logs / suite).glob("*.json")):
+            try:
+                shard = json.loads(path.read_text())
+                values = list(shard.values()) if isinstance(shard, dict) else []
+                total = sum(int(v["total_count"]) for v in values if isinstance(v, dict) and "total_count" in v)
+            except (OSError, json.JSONDecodeError, TypeError, KeyError, ValueError):
+                total = -1
+            print(f"{suite:<16} {path.name:<26} {total:>8} {len(values):>5}")
 
 
 def align(strata_a, strata_b, name_a="arm A", name_b="arm B"):
@@ -181,6 +218,24 @@ def main():
         "--run", action="append", required=True, metavar="NAME=ROOT", help="repeatable; ROOT holds logs/<suite>/*.json"
     )
     parser.add_argument("--suites", default=None, help="comma list; default: every suite present in the first run")
+    parser.add_argument(
+        "--shard-glob",
+        default="*.json",
+        help="shard filename pattern per suite; LIBERO-Plus use '*_to_*.json' (default: *.json)",
+    )
+    parser.add_argument(
+        "--skip-glob",
+        action="append",
+        default=None,
+        metavar="PATTERN",
+        help="repeatable; shard files to ignore, e.g. '*_to_*' to score the LIBERO endpoint only",
+    )
+    parser.add_argument(
+        "--expected-per-suite",
+        type=int,
+        default=None,
+        help="hard-fail unless every suite totals this many episodes (LIBERO: 500)",
+    )
     parser.add_argument("--primary", default=None, help="arm the gate is about (default: no gate verdict)")
     parser.add_argument(
         "--reference", action="append", default=None, metavar="ARM", help="repeatable; every reference must be cleared"
@@ -188,7 +243,10 @@ def main():
     parser.add_argument("--min-delta", type=float, default=3.0, help="gate margin in percentage points")
     parser.add_argument("--draws", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--out-dir", default=None)
+    parser.add_argument(
+        "--list-shards", action="store_true", help="print every suite file with its episode total and exit"
+    )
     args = parser.parse_args()
 
     runs = []
@@ -197,13 +255,22 @@ def main():
             raise SystemExit(f"--run expects NAME=ROOT, got {item!r}")
         name, root = item.split("=", 1)
         runs.append((name, root))
-    if len(runs) < 2:
+    if len(runs) < 2 and not args.list_shards:
         raise SystemExit("need at least two --run entries to compare")
+    if args.list_shards:
+        for _, root in runs:
+            list_shards(root)
+        return
+    if args.out_dir is None:
+        raise SystemExit("--out-dir is required")
     if args.primary is not None and args.primary not in dict(runs):
         raise SystemExit(f"--primary {args.primary!r} is not one of {[n for n, _ in runs]}")
 
     suites = [s.strip() for s in args.suites.split(",") if s.strip()] if args.suites else None
-    strata = {name: load_arm(root, suites) for name, root in runs}
+    strata = {
+        name: load_arm(root, suites, args.shard_glob, args.skip_glob or (), args.expected_per_suite)
+        for name, root in runs
+    }
     resolved = sorted({k[0] for k in next(iter(strata.values()))})
     print(f"[paired] suites: {','.join(resolved)}  draws={args.draws} seed={args.seed}")
     print(f"{'arm':<14} {'episodes':>9} {'successes':>10} {'SR':>8}")

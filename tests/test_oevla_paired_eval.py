@@ -167,3 +167,24 @@ def test_main_gates_the_primary_against_any_reference(tmp_path, monkeypatch, cap
     assert payload["gate"]["references"]["taskfixed"]["pass"]
     assert payload["pairs"]["full|taskfixed"]["delta_pp"] == pytest.approx(8.0)
     assert "GO" in capsys.readouterr().out
+
+
+def test_load_arm_can_select_one_endpoint(tmp_path):
+    """LIBERO and LIBERO-Plus share logs/<suite>/ but disagree on the key universe."""
+    _write(tmp_path, "libero_spatial", "0_4.json", {"0": {"total_count": 50, "success_count": 48}})
+    _write(tmp_path, "libero_spatial", "0_to_100.json", {"camera": {"total_count": 90, "success_count": 70}})
+    mixed = PE.load_arm(tmp_path)
+    assert sorted(mixed) == [("libero_spatial", "0"), ("libero_spatial", "camera")]
+    assert sum(n for n, _ in mixed.values()) == 140
+    only_libero = PE.load_arm(tmp_path, skip_globs=("*_to_*",))
+    assert only_libero == {("libero_spatial", "0"): (50, 48)}
+    only_plus = PE.load_arm(tmp_path, shard_glob="*_to_*.json")
+    assert only_plus == {("libero_spatial", "camera"): (90, 70)}
+
+
+def test_load_arm_hard_fails_on_an_implausible_per_suite_total(tmp_path):
+    _write(tmp_path, "libero_spatial", "0_4.json", {"0": {"total_count": 50, "success_count": 48}})
+    _write(tmp_path, "libero_spatial", "0_to_100.json", {"camera": {"total_count": 50, "success_count": 40}})
+    with pytest.raises(SystemExit, match="differ from the expected 500"):
+        PE.load_arm(tmp_path, skip_globs=(), expected_per_suite=500)
+    assert PE.load_arm(tmp_path, skip_globs=("*_to_*",), expected_per_suite=50)
