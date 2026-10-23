@@ -83,7 +83,10 @@ fi
 ckpt_dir=$(dirname "$your_ckpt")
 eval_name=$(basename "$your_ckpt")
 eval_name="${eval_name%.*}"
-eval_root="${ckpt_dir}/${eval_name}"
+# This endpoint gets its own root: LIBERO writes the un-suffixed one, and both
+# `in_one` drivers `rm -f logs/<suite>/*.json` at start, so sharing a root means
+# whichever endpoint runs second deletes the other one's shards.
+eval_root="${ckpt_dir}/${eval_name}_plus"
 
 video_out_path="${eval_root}/videos/${task_suite_name}"
 log_path="${eval_root}/logs/${task_suite_name}"
