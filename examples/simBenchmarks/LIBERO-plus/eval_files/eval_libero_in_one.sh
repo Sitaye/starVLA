@@ -78,15 +78,16 @@ if ! wait_for_server "${server_pid}" "${base_port}"; then
     exit 1
 fi
 
-# Put logs/videos/aggregate under a per-checkpoint folder:
-#   <ckpt_dir>/<ckpt basename without ext>/{videos,logs,overall_results.json}
+# Eval artifacts: <ckpt_dir>/<ckpt basename without ext>/eval/<endpoint>/
+#   {logs,videos,overall_results.json}
+# The endpoint is a path component, not a filename suffix: LIBERO and LIBERO-Plus share
+# every suite name and each driver wipes logs/<suite>/*.json at start, so a shared root
+# means whichever endpoint runs second deletes the other one's shards.
 ckpt_dir=$(dirname "$your_ckpt")
 eval_name=$(basename "$your_ckpt")
 eval_name="${eval_name%.*}"
-# This endpoint gets its own root: LIBERO writes the un-suffixed one, and both
-# `in_one` drivers `rm -f logs/<suite>/*.json` at start, so sharing a root means
-# whichever endpoint runs second deletes the other one's shards.
-eval_root="${ckpt_dir}/${eval_name}_plus"
+ENDPOINT="libero_plus"
+eval_root="${ckpt_dir}/${eval_name}/eval/${ENDPOINT}"
 
 video_out_path="${eval_root}/videos/${task_suite_name}"
 log_path="${eval_root}/logs/${task_suite_name}"

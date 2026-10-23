@@ -37,12 +37,15 @@ CUDA_VISIBLE_DEVICES=$gpu_id ${starVLA_python} deployment/model_server/server_po
 server_pid=$!
 
 
-# Extract model_root from your_ckpt
-model_root=$(echo "$your_ckpt" | awk -F'/checkpoints/' '{print $1}')
+# Artifacts: <ckpt_dir>/<ckpt basename>/eval/<endpoint>/{logs,videos}; see
+# eval_libero_in_one.sh for why the endpoint is a path component.
+eval_name=$(basename "$your_ckpt")
+eval_name="${eval_name%.*}"
+eval_root="$(dirname "$your_ckpt")/${eval_name}/eval/libero"
 folder_name=$(echo "$your_ckpt" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
 
-video_out_path="${model_root}/videos/${task_suite_name}/${folder_name}"
-log_path="${model_root}/logs/${task_suite_name}"
+video_out_path="${eval_root}/videos/${task_suite_name}"
+log_path="${eval_root}/logs/${task_suite_name}"
 mkdir -p "$video_out_path"
 mkdir -p "$log_path"
 

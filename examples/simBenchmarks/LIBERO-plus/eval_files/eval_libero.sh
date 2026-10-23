@@ -26,8 +26,9 @@ export PYTHONPATH="${PYTHONPATH:-}:${LIBERO_PLUS_HOME}:${STARVLA_DIR}"
 ckpt_dir=$(dirname "$your_ckpt")
 eval_name=$(basename "$your_ckpt")
 eval_name="${eval_name%.*}"
-# Same root as the other plus drivers, deliberately distinct from LIBERO's.
-eval_root="${ckpt_dir}/${eval_name}_plus"
+# Same root as the other plus drivers; the endpoint is a path component (see
+# eval_libero_in_one.sh) so a checkpoint never shares artifacts between endpoints.
+eval_root="${ckpt_dir}/${eval_name}/eval/libero_plus"
 mkdir -p "${eval_root}"
 
 base_port="${BASE_PORT:-9883}"

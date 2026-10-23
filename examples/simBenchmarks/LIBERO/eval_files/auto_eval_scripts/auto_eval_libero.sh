@@ -138,7 +138,8 @@ for ckpt in "${CKPT_LIST[@]}"; do
         echo "[SKIP] Final aggregation skipped for ${eval_name} (had failed eval jobs)"
         continue
     fi
-    eval_root="${ckpt_dir}/${eval_name}"
+    # Must match eval_libero_in_one.sh.
+    eval_root="${ckpt_dir}/${eval_name}/eval/libero"
     suites_csv=""
     for suite in "${TASK_SUITES[@]}"; do
         if [[ -n "$suites_csv" ]]; then suites_csv="${suites_csv},"; fi

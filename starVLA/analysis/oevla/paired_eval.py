@@ -34,6 +34,11 @@ Three consequences, written down so the numbers cannot be read as something stro
 
 So this must be frozen before the numbers exist (design doc 6.14): choosing the estimator
 after seeing the results is exactly the freedom the gate was written to remove.
+
+Point `--run NAME=ROOT` at an endpoint root, not at a checkpoint: the drivers write
+`<ckpt_dir>/<ckpt name>/eval/<endpoint>/{logs,videos,overall_results.json}` with
+`<endpoint>` in `{libero, libero_plus}`. Pass `--shard-glob` / `--skip-glob` when the tree
+still holds both endpoints' shards (`*_to_*` names are LIBERO-Plus).
 """
 
 import argparse
@@ -215,7 +220,11 @@ def judge(record, min_delta):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "--run", action="append", required=True, metavar="NAME=ROOT", help="repeatable; ROOT holds logs/<suite>/*.json"
+        "--run",
+        action="append",
+        required=True,
+        metavar="NAME=ROOT",
+        help="repeatable; ROOT is an endpoint root, i.e. <ckpt>/eval/<endpoint> (holds logs/<suite>/*.json)",
     )
     parser.add_argument("--suites", default=None, help="comma list; default: every suite present in the first run")
     parser.add_argument(
